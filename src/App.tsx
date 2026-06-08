@@ -145,6 +145,28 @@ function calculateRealRssi(distanceMeters: number, txPower: number, txGain: numb
   return Math.floor(txPower + txGain - fspl);
 }
 
+// Tìm ID của Mesh Controller quản trị cho một AP (Tru vết miền quản trị Mesh độc lập)
+function getControllerId(nodeId: string, nodes: Record<string, NetworkNode>): string | null {
+  const node = nodes[nodeId];
+  if (!node || !node.isMeshEnabled) return null;
+  if (node.meshRole === 'controller') return node.id;
+
+  const visited = new Set<string>();
+  let current = node;
+  while (current && current.uplinkId && current.uplinkId !== 'none') {
+    if (visited.has(current.id)) break;
+    visited.add(current.id);
+
+    const parent = nodes[current.uplinkId];
+    if (!parent) break;
+    if (parent.isMeshEnabled && parent.meshRole === 'controller') {
+      return parent.id;
+    }
+    current = parent;
+  }
+  return null;
+}
+
 // --- SAMPLE INITIAL DATABASE ---
 const defaultNetworkNodes: Record<string, NetworkNode> = {
   DEV_1: {
@@ -651,9 +673,13 @@ export default function App() {
               } else if (currentRssiToNode < triggerThreshold && bestDevId !== cli.connectedTo && maxRssi > currentRssiToNode + requiredDelta) {
                 const currDev = networkNodes[cli.connectedTo];
                 const bestDev = networkNodes[bestDevId];
-                // Roaming mượt trong cùng một Mesh SSID
+                // Roaming mượt chỉ khi CẢ HAI thiết bị đều bật Mesh VÀ cùng một Mesh Controller quản lý!
                 if (currDev && bestDev && currDev.isMeshEnabled && bestDev.isMeshEnabled) {
-                  cli.connectedTo = bestDevId;
+                  const ctrl1 = getControllerId(currDev.id, networkNodes);
+                  const ctrl2 = getControllerId(bestDev.id, networkNodes);
+                  if (ctrl1 && ctrl2 && ctrl1 === ctrl2) {
+                    cli.connectedTo = bestDevId;
+                  }
                 }
               }
             } else {
@@ -685,30 +711,35 @@ export default function App() {
           } else {
             const oldDev = networkNodes[prevConnectedTo];
             const nextDev = networkNodes[cli.connectedTo];
-            if (oldDev && nextDev) {
-              if (oldDev.isMeshEnabled && nextDev.isMeshEnabled) {
-                const supportR = cli.support80211r !== false;
-                if (supportR) {
-                  addLog(
-                    'Auto Roaming (FT 802.11r)',
-                    `Seamless Fast Roaming: Thiết bị ${cli.name} chuyển vùng mượt bằng công nghệ 802.11r từ ${oldDev.name} sang ${nextDev.name} chỉ mất ~15ms và 0% rớt gói (RSSI: ${rssiMap[oldDev.id]}dBm -> ${rssiMap[nextDev.id]}dBm).`,
-                    'success'
-                  );
-                } else {
-                  addLog(
-                    'Auto Roaming (Mesh)',
-                    `Mesh Roaming: Thiết bị ${cli.name} chuyển vùng truyền thống (WPA Re-auth) từ ${oldDev.name} sang ${nextDev.name} mất ~280ms, có thể rớt nhẹ vài gói tin (RSSI: ${rssiMap[oldDev.id]}dBm -> ${rssiMap[nextDev.id]}dBm).`,
-                    'success'
-                  );
-                }
-              } else {
-                addLog(
-                  'Đổi WiFi độc lập',
-                  `Thiết bị ${cli.name} đứt mạng tạm thời để kết nối lại vào trạm độc lập tốt hơn: ${nextDev.name}`,
-                  'info'
-                );
-              }
-            }
+             if (oldDev && nextDev) {
+               const ctrlOld = getControllerId(oldDev.id, networkNodes);
+               const ctrlNext = getControllerId(nextDev.id, networkNodes);
+               const isSameController = ctrlOld && ctrlNext && ctrlOld === ctrlNext;
+
+               if (oldDev.isMeshEnabled && nextDev.isMeshEnabled && isSameController) {
+                 const supportR = cli.support80211r !== false;
+                 const controllerName = networkNodes[ctrlOld]?.name || 'Controller';
+                 if (supportR) {
+                   addLog(
+                     'Auto Roaming (FT 802.11r)',
+                     `Seamless Fast Roaming: Thiết bị ${cli.name} chuyển vùng mượt bằng công nghệ 802.11r từ ${oldDev.name} sang ${nextDev.name} dưới chung một miền quản lý bởi trạm [${controllerName}] chỉ mất ~15ms và 0% rớt gói (RSSI: ${rssiMap[oldDev.id]}dBm -> ${rssiMap[nextDev.id]}dBm).`,
+                     'success'
+                   );
+                 } else {
+                   addLog(
+                     'Auto Roaming (Mesh)',
+                     `Mesh Roaming: Thiết bị ${cli.name} chuyển vùng từ ${oldDev.name} sang ${nextDev.name} (chung trạm điều khiển [${controllerName}]) mất ~280ms, có thể rớt nhẹ vài gói tin (RSSI: ${rssiMap[oldDev.id]}dBm -> ${rssiMap[nextDev.id]}dBm).`,
+                     'success'
+                   );
+                 }
+               } else {
+                 addLog(
+                   'Chuyển mạng độc lập',
+                   `Thiết bị ${cli.name} chuyển vùng chậm, ngắt sóng hoàn toàn (~2.2 giây) để kết nối lại từ AP độc lập ${oldDev.name} sang AP mới tốt hơn: ${nextDev.name} (Hai AP thuộc hai trạm Controller khác nhau, không hỗ trợ chuyển dữ liệu Seamless Roaming!)`,
+                   'warning'
+                 );
+               }
+             }
           }
         }
 
@@ -1072,7 +1103,9 @@ export default function App() {
     }
 
     const targetAp = networkNodes[bestApId];
-    const isMesh = currentAp?.isMeshEnabled && targetAp?.isMeshEnabled;
+    const ctrl1 = getControllerId(cli.connectedTo, networkNodes);
+    const ctrl2 = getControllerId(bestApId, networkNodes);
+    const isMesh = currentAp?.isMeshEnabled && targetAp?.isMeshEnabled && ctrl1 && ctrl2 && ctrl1 === ctrl2;
 
     setIsHandulating(true);
     setAutoRoam(false); // Buộc khóa auto roam tạm thời để biểu thị
@@ -1096,15 +1129,16 @@ export default function App() {
       });
 
       if (isMesh) {
+        const controllerNode = ctrl1 ? networkNodes[ctrl1] : null;
         addLog(
           'Roaming (Mesh)',
-          `Phối hợp Controller: ${cli.name} đã chuyển vùng sang AP ${targetAp?.name} thành công trong 15ms (Không mất gói).`,
+          `Phối hợp Controller [${controllerNode?.name || 'Mesh'}]: ${cli.name} đã chuyển vùng sang AP ${targetAp?.name} thành công trong 15ms (Không mất gói).`,
           'success'
         );
       } else {
         addLog(
           'Chuyển mạng độc lập',
-          `Quá trình ngắt mạng, bắt SSID ${targetAp?.name} hoàn tất. Gián đoạn 2200ms kết nối IP.`,
+          `Quá trình ngắt mạng từ [${currentAp?.name}] để bắt SSID của [${targetAp?.name}] hoàn tất. Đứt sóng & cấp lại kết nối mất ~2200ms do không cùng Controller điều phối.`,
           'warning'
         );
       }
@@ -1948,6 +1982,9 @@ export default function App() {
                         }
                       }
 
+                      const ctrlId = getControllerId(dev.id, networkNodes);
+                      const ctrlNode = ctrlId ? networkNodes[ctrlId] : null;
+
                       detailSsidBadge = (
                         <div className="mt-1 flex flex-col items-center gap-0.5">
                           {dev.meshRole === 'controller' ? (
@@ -1961,6 +1998,9 @@ export default function App() {
                           )}
                           <span className="text-[8px] text-slate-350 max-w-[85px] truncate mt-0.5" title={dev.ssid}>
                             SSID: {dev.ssid}
+                          </span>
+                          <span className="text-[7.5px] text-violet-400 font-bold truncate max-w-[85px]" title={ctrlNode ? `Thuộc Controller: ${ctrlNode.name}` : 'Chưa có Controller quản lý'}>
+                            {ctrlNode ? `• ${ctrlNode.name.replace(/^(Modem|Router|Switch|AP|Ceiling|Ceiling Access Point|FPT|FPT Optical|FPT Switch)\s+/i, '')}` : '• Lẻ/Không CTRL'}
                           </span>
                         </div>
                       );
@@ -2669,7 +2709,8 @@ export default function App() {
                             setModalData({
                               ...modalData,
                               meshRole: role,
-                              ssid: role === 'agent' ? 'KTCN_Wifi_Guest' : modalData.ssid
+                              ssid: role === 'agent' ? 'KTCN_Wifi_Guest' : modalData.ssid,
+                              uplinkType: role === 'controller' ? 'wired' : modalData.uplinkType
                             });
                           }}
                           className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-2 rounded outline-none"
@@ -2800,13 +2841,27 @@ export default function App() {
                     <div>
                       <label className="block text-slate-450 font-bold text-[8.5px] uppercase mb-1">Đường trung chuyển dải trung tâm</label>
                       <select
-                        value={modalData.uplinkType}
-                        onChange={(e) => setModalData({ ...modalData, uplinkType: e.target.value as 'wired' | 'wireless' })}
+                        value={modalData.isMeshEnabled && modalData.meshRole === 'controller' ? 'wired' : modalData.uplinkType}
+                        onChange={(e) => {
+                          const val = e.target.value as 'wired' | 'wireless';
+                          if (val === 'wireless' && modalData.isMeshEnabled && modalData.meshRole === 'controller') {
+                            alert('Trạm điều khiển (Mesh Controller) không thể kết nối uplink bằng Wi-Fi không dây. Controller phải là thiết bị chính/gốc. Vui lòng chuyển vai trò thành Agent hoặc kết nối bằng cổng Cáp LAN mạng có dây!');
+                            return;
+                          }
+                          setModalData({ ...modalData, uplinkType: val });
+                        }}
                         className="w-full bg-slate-855 border border-slate-700 text-slate-202 py-1.5 px-2 rounded text-[11px] outline-none"
                       >
                         <option value="wired">Sợi LAN dây mạng (Gigabit LAN)</option>
-                        <option value="wireless">Mesh không dây Backhaul (Khớp 5GHz)</option>
+                        {!(modalData.isMeshEnabled && modalData.meshRole === 'controller') && (
+                          <option value="wireless">Mesh không dây Backhaul (Khớp 5GHz)</option>
+                        )}
                       </select>
+                      {modalData.isMeshEnabled && modalData.meshRole === 'controller' && (
+                        <p className="text-[9px] text-amber-500 mt-1 italic leading-tight">
+                          * Lưu lý thuyết Mesh: Thiết bị đóng vai trò là Mesh Controller (Trạm gốc điều khiển) không thể bắt bắc cầu (uplink) không dây từ trạm khác. Chỉ hỗ trợ liên kết LAN có dây (Wired Backhaul) hoặc không chọn uplink.
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>
