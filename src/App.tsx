@@ -1,0 +1,2232 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  Server,
+  Layers,
+  Wifi,
+  Smartphone,
+  Settings,
+  Trash2,
+  Plus,
+  Minus,
+  Hand,
+  X,
+  Check,
+  AlertTriangle,
+  Play,
+  Info,
+  ChevronDown,
+  ChevronUp,
+  ChevronLeft,
+  ChevronRight,
+  Database,
+  Router as RouterIcon
+} from 'lucide-react';
+
+// --- DATA TYPE DEFINITIONS ---
+export interface DeviceSpecs {
+  txPower: number; // dBm
+  gain: number;    // dBi
+}
+
+export type DeviceType = 'isp_modem' | 'router_wifi' | 'switch' | 'ap';
+
+export interface NetworkNode {
+  id: string;
+  type: DeviceType;
+  name: string;
+  icon: 'Server' | 'Layers' | 'Wifi' | 'RouterIcon';
+  colorTheme: 'sky' | 'emerald' | 'slate' | 'purple';
+  x: number; // % (0-100)
+  y: number; // % (0-100)
+  hasWifi: boolean;
+  specs: DeviceSpecs;
+  mode: 'router' | 'bridge';
+  ssid: string;
+  ports: number;
+  isMeshEnabled: boolean;
+  meshRole: 'controller' | 'agent';
+  uplinkId: string; // 'none' hoặc id node khác
+  uplinkType: 'wired' | 'wireless';
+  isPoe: boolean;
+  wanIpMode: 'dhcp' | 'static';
+  wanIp: string;
+  lanIp: string;
+  bridgeIpMode: 'dhcp' | 'static';
+  bridgeIp: string;
+}
+
+export interface ClientNode {
+  id: string;
+  name: string;
+  type: 'client';
+  x: number; // % (0-100)
+  y: number; // % (0-100)
+  connectedTo: string | null; // ID của NetworkNode hoặc null
+  forceConnect: 'auto' | string; // 'auto' hoặc ID của NetworkNode
+  currentRssi: number;
+  rssiMap: Record<string, number>;
+  ipMode: 'dhcp' | 'static';
+  ipAddress: string;
+}
+
+export interface Wall {
+  x: number; // %
+  y: number; // %
+  w: number; // %
+  h: number; // %
+  type: 'brick' | 'concrete' | 'glass';
+  groupId: number;
+}
+
+export interface AppLog {
+  id: string;
+  timestamp: string;
+  title: string;
+  desc: string;
+  type: 'info' | 'success' | 'warning' | 'error';
+}
+
+// --- CONSTANTS ---
+const CANVAS_WIDTH_METERS = 200;
+const MIN_RSSI = -95;
+const DISCONNECT_RSSI = -85; // Ngưỡng đứt kết nối hoàn toàn
+const wallPenalties = { brick: 8, concrete: 15, glass: 2 };
+
+// --- HELPER FUNCTIONS FOR INTERSECTION ---
+function lineIntersects(
+  x1: number, y1: number, x2: number, y2: number,
+  x3: number, y3: number, x4: number, y4: number
+): boolean {
+  const den = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1);
+  if (den === 0) return false;
+  const uA = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / den;
+  const uB = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / den;
+  return (uA >= 0 && uA <= 1 && uB >= 0 && uB <= 1);
+}
+
+function getWallAttenuation(x1: number, y1: number, x2: number, y2: number, walls: Wall[]): number {
+  let penalty = 0;
+  for (const w of walls) {
+    const left = lineIntersects(x1, y1, x2, y2, w.x, w.y, w.x, w.y + w.h);
+    const right = lineIntersects(x1, y1, x2, y2, w.x + w.w, w.y, w.x + w.w, w.y + w.h);
+    const top = lineIntersects(x1, y1, x2, y2, w.x, w.y, w.x + w.w, w.y);
+    const bot = lineIntersects(x1, y1, x2, y2, w.x, w.y + w.h, w.x + w.w, w.y + w.h);
+    if (left || right || top || bot) {
+      penalty += wallPenalties[w.type] || 0;
+    }
+  }
+  return penalty;
+}
+
+// Tính khoảng cách thực tế dựa trên % tọa độ canvas (mô phỏng)
+function calculateDistanceMeters(x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const pctDistance = Math.sqrt(dx * dx + dy * dy);
+  return (pctDistance / 100) * CANVAS_WIDTH_METERS;
+}
+
+// Đo mồi công suất phát (FSPL)
+function calculateRealRssi(distanceMeters: number, txPower: number, txGain: number): number {
+  const d = distanceMeters < 0.1 ? 0.1 : distanceMeters;
+  const fspl = 46 + 30 * Math.log10(d);
+  return Math.floor(txPower + txGain - fspl);
+}
+
+// --- SAMPLE INITIAL DATABASE ---
+const defaultNetworkNodes: Record<string, NetworkNode> = {
+  DEV_1: {
+    id: 'DEV_1',
+    type: 'isp_modem',
+    name: 'ISP Modem chính',
+    icon: 'Server',
+    colorTheme: 'sky',
+    x: 18,
+    y: 35,
+    hasWifi: true,
+    specs: { txPower: 18, gain: 3 },
+    mode: 'router',
+    ssid: 'KTCN_NhaMang_5G',
+    ports: 4,
+    isMeshEnabled: false,
+    meshRole: 'agent',
+    uplinkId: 'none',
+    uplinkType: 'wired',
+    isPoe: false,
+    wanIpMode: 'static',
+    wanIp: '14.225.2.11',
+    lanIp: '192.168.1.1',
+    bridgeIpMode: 'dhcp',
+    bridgeIp: ''
+  },
+  DEV_2: {
+    id: 'DEV_2',
+    type: 'switch',
+    name: 'Switch LAN Tầng 1',
+    icon: 'Layers',
+    colorTheme: 'slate',
+    x: 42,
+    y: 35,
+    hasWifi: false,
+    specs: { txPower: 0, gain: 0 },
+    mode: 'bridge',
+    ssid: '',
+    ports: 8,
+    isMeshEnabled: false,
+    meshRole: 'agent',
+    uplinkId: 'DEV_1',
+    uplinkType: 'wired',
+    isPoe: true,
+    wanIpMode: 'dhcp',
+    wanIp: '',
+    lanIp: '',
+    bridgeIpMode: 'dhcp',
+    bridgeIp: ''
+  },
+  DEV_3: {
+    id: 'DEV_3',
+    type: 'ap',
+    name: 'AP Phòng Khách',
+    icon: 'Wifi',
+    colorTheme: 'purple',
+    x: 58,
+    y: 20,
+    hasWifi: true,
+    specs: { txPower: 20, gain: 4 },
+    mode: 'bridge',
+    ssid: 'KTCN_Wifi_Guest',
+    ports: 4,
+    isMeshEnabled: true,
+    meshRole: 'controller',
+    uplinkId: 'DEV_2',
+    uplinkType: 'wired',
+    isPoe: false,
+    wanIpMode: 'dhcp',
+    wanIp: '',
+    lanIp: '',
+    bridgeIpMode: 'dhcp',
+    bridgeIp: ''
+  },
+  DEV_4: {
+    id: 'DEV_4',
+    type: 'ap',
+    name: 'AP Sân Thượng',
+    icon: 'Wifi',
+    colorTheme: 'purple',
+    x: 80,
+    y: 50,
+    hasWifi: true,
+    specs: { txPower: 20, gain: 4 },
+    mode: 'bridge',
+    ssid: 'KTCN_Wifi_Guest',
+    ports: 4,
+    isMeshEnabled: true,
+    meshRole: 'agent',
+    uplinkId: 'DEV_3',
+    uplinkType: 'wireless',
+    isPoe: false,
+    wanIpMode: 'dhcp',
+    wanIp: '',
+    lanIp: '',
+    bridgeIpMode: 'dhcp',
+    bridgeIp: ''
+  }
+};
+
+const defaultClientNodes: Record<string, ClientNode> = {
+  CLI_1: {
+    id: 'CLI_1',
+    name: 'Smartphone BinhCK',
+    type: 'client',
+    x: 64,
+    y: 30,
+    connectedTo: 'DEV_3',
+    forceConnect: 'auto',
+    currentRssi: -52,
+    rssiMap: {},
+    ipMode: 'dhcp',
+    ipAddress: '192.168.1.100'
+  }
+};
+
+const defaultWalls: Wall[] = [
+  { x: 69, y: 10, w: 2, h: 48, type: 'brick', groupId: 1 },
+  { x: 30, y: 45, w: 25, h: 2, type: 'concrete', groupId: 2 }
+];
+
+export default function App() {
+  // --- STATE ---
+  const [networkNodes, setNetworkNodes] = useState<Record<string, NetworkNode>>(() => {
+    const saved = localStorage.getItem('wifi-sim-nodes');
+    return saved ? JSON.parse(saved) : defaultNetworkNodes;
+  });
+
+  const [clientNodes, setClientNodes] = useState<Record<string, ClientNode>>(() => {
+    const saved = localStorage.getItem('wifi-sim-clients');
+    return saved ? JSON.parse(saved) : defaultClientNodes;
+  });
+
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [customWalls, setCustomWalls] = useState<Wall[]>(() => {
+    const saved = localStorage.getItem('wifi-sim-walls');
+    return saved ? JSON.parse(saved) : defaultWalls;
+  });
+
+  const [logs, setLogs] = useState<AppLog[]>([]);
+  const [autoRoam, setAutoRoam] = useState(true);
+  const [isHandulating, setIsHandulating] = useState(false); // Đang nổ ra xử lý thủ công
+  const [isSidebarEnvOpen, setIsSidebarEnvOpen] = useState(true);
+  const [isSidebarRoamOpen, setIsSidebarRoamOpen] = useState(true);
+
+  // Custom confirmation modal state for iframe compatibility
+  const [confirmAction, setConfirmAction] = useState<{
+    message: string;
+    onConfirm: () => void;
+    title?: string;
+    btnText?: string;
+    btnColor?: string;
+  } | null>(null);
+
+  // Canvas Viewport State (Zoom & Pan)
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isCanvasPanning, setIsCanvasPanning] = useState(false);
+  const panStartRef = useRef({ x: 0, y: 0 });
+
+  // Vẽ Tường State
+  const [editorLayout, setEditorLayout] = useState<'none' | 'custom'>('custom');
+  const [selectedTool, setSelectedTool] = useState<'pan' | 'line' | 'rect' | 'eraser'>('pan');
+  const [selectedMaterial, setSelectedMaterial] = useState<'brick' | 'concrete' | 'glass'>('brick');
+  const [isDrawingStep2, setIsDrawingStep2] = useState(false);
+  const [drawStart, setDrawStart] = useState({ x: 0, y: 0 });
+  const [previewWall, setPreviewWall] = useState<Omit<Wall, 'groupId'> | null>(null);
+  const currentDrawGroupId = useRef(defaultWalls.length + 1);
+
+  // Kéo thả Node State
+  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
+
+  // Setup Modal cấu hình
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [modalData, setModalData] = useState<{
+    name: string;
+    mode: 'router' | 'bridge';
+    wanIpMode: 'dhcp' | 'static';
+    wanIp: string;
+    lanIp: string;
+    bridgeIpMode: 'dhcp' | 'static';
+    bridgeIp: string;
+    ssid: string;
+    ports: number;
+    isMeshEnabled: boolean;
+    meshRole: 'controller' | 'agent';
+    uplinkId: string;
+    uplinkType: 'wired' | 'wireless';
+    isPoe: boolean;
+    txPower: number;
+    gain: number;
+    forceConnect: string;
+    ipMode: 'dhcp' | 'static';
+    ipAddress: string;
+    hasWifi: boolean;
+  } | null>(null);
+
+  const canvasRef = useRef<HTMLDivElement>(null);
+
+  // Ép kiểu danh sách rõ ràng để tránh lỗi TS2339 (unknown type property access)
+  const networkNodeList = Object.values(networkNodes) as NetworkNode[];
+  const clientNodeList = Object.values(clientNodes) as ClientNode[];
+
+  // --- LOCAL PERSISTENCE ---
+  useEffect(() => {
+    localStorage.setItem('wifi-sim-nodes', JSON.stringify(networkNodes));
+  }, [networkNodes]);
+
+  useEffect(() => {
+    localStorage.setItem('wifi-sim-clients', JSON.stringify(clientNodes));
+  }, [clientNodes]);
+
+  useEffect(() => {
+    localStorage.setItem('wifi-sim-walls', JSON.stringify(customWalls));
+  }, [customWalls]);
+
+  // --- LOGGER ---
+  const addLog = useCallback((title: string, desc: string, type: 'info' | 'success' | 'warning' | 'error' = 'info') => {
+    const timestamp = new Date().toLocaleTimeString();
+    const newLog: AppLog = {
+      id: 'LOG_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+      timestamp,
+      title,
+      desc,
+      type
+    };
+    setLogs(prev => [newLog, ...prev].slice(0, 50)); // Lưu tối đa 50 dải
+  }, []);
+
+  // Log chào mừng ban đầu
+  useEffect(() => {
+    addLog(
+      'Hệ thống khởi tạo',
+      'Chào mừng bạn đến với mô phỏng Wi-Fi Topology & Roaming của Kỹ Thuật Công Nghệ. Thêm thiết bị mạng để lập cấu trúc.',
+      'success'
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- TRUY VẾT IP DHCP GATEWAY ---
+  const getSubnetGatewayForNode = useCallback((nodeId: string): string => {
+    let visited = new Set<string>();
+    let currentNodeId = nodeId;
+    let subnet = '192.168.1';
+
+    while (currentNodeId && currentNodeId !== 'none') {
+      if (visited.has(currentNodeId)) break;
+      visited.add(currentNodeId);
+
+      const node = networkNodes[currentNodeId];
+      if (!node) break;
+
+      if (node.mode === 'router') {
+        const parts = (node.lanIp || '192.168.1.1').split('.');
+        if (parts.length >= 3) {
+          subnet = `${parts[0]}.${parts[1]}.${parts[2]}`;
+        }
+        break;
+      }
+      currentNodeId = node.uplinkId;
+    }
+    return subnet;
+  }, [networkNodes]);
+
+  const getDHCPAddressForNode = useCallback((node: NetworkNode): string => {
+    if (node.mode === 'router') {
+      return node.lanIp || '192.168.1.1';
+    }
+    const subnet = getSubnetGatewayForNode(node.id);
+    const suffix = (parseInt(node.id.replace(/[^\d]/g, '')) % 100) + 10;
+    return `${subnet}.${suffix}`;
+  }, [getSubnetGatewayForNode]);
+
+  const getDHCPAddressForClient = useCallback((client: ClientNode): string => {
+    if (!client.connectedTo) return 'Mất liên kết (No IP)';
+    const subnet = getSubnetGatewayForNode(client.connectedTo);
+    const suffix = (parseInt(client.id.replace(/[^\d]/g, '')) % 100) + 100;
+    return `${subnet}.${suffix}`;
+  }, [getSubnetGatewayForNode]);
+
+  // --- PHYSICS ENGINE -- CẬP NHẬT RSSI & ROAMING ---
+  const updateNetworkState = useCallback(() => {
+    setClientNodes(prevClients => {
+      let changed = false;
+      const nextClients = { ...prevClients };
+
+      const currentNetworkNodes = Object.values(networkNodes) as NetworkNode[];
+
+      Object.keys(nextClients).forEach(cliId => {
+        const cli = { ...nextClients[cliId] };
+        let bestDevId: string | null = null;
+        let maxRssi = MIN_RSSI;
+        const rssiMap: Record<string, number> = {};
+
+        // Tính RSSI từ client tới các AP/Router Wi-Fi
+        currentNetworkNodes.forEach(dev => {
+          if (!dev.hasWifi) return;
+          const distMeters = calculateDistanceMeters(cli.x, cli.y, dev.x, dev.y);
+          const wallAtten = getWallAttenuation(cli.x, cli.y, dev.x, dev.y, customWalls);
+          const finalRssi = Math.max(
+            MIN_RSSI,
+            calculateRealRssi(distMeters, dev.specs.txPower, dev.specs.gain) - wallAtten
+          );
+          rssiMap[dev.id] = finalRssi;
+
+          if (finalRssi > maxRssi) {
+            maxRssi = finalRssi;
+            bestDevId = dev.id;
+          }
+        });
+
+        cli.rssiMap = rssiMap;
+        const prevConnectedTo = cli.connectedTo;
+
+        if (cli.forceConnect !== 'auto' && networkNodes[cli.forceConnect]) {
+          // Ép kết nối
+          cli.connectedTo = cli.forceConnect;
+        } else if (autoRoam && !isHandulating) {
+          const currentRssiToNode = cli.connectedTo && rssiMap[cli.connectedTo] ? rssiMap[cli.connectedTo] : MIN_RSSI;
+
+          if (bestDevId && maxRssi > DISCONNECT_RSSI) {
+            if (!cli.connectedTo || currentRssiToNode <= DISCONNECT_RSSI) {
+              // Kết nối mới hoàn toàn nếu chưa nối hoặc sóng cũ sụt quá đứt mạng
+              cli.connectedTo = bestDevId;
+            } else if (currentRssiToNode < -70 && bestDevId !== cli.connectedTo && maxRssi > currentRssiToNode + 3) {
+              // Sóng của trạm hiện tại đang dưới -70dBm, trạm mới tốt hơn ít nhất 3dBm
+              const currDev = networkNodes[cli.connectedTo];
+              const bestDev = networkNodes[bestDevId];
+              // Roaming mượt trong cùng một Mesh SSID
+              if (currDev && bestDev && currDev.isMeshEnabled && bestDev.isMeshEnabled) {
+                cli.connectedTo = bestDevId;
+              }
+            }
+          } else {
+            cli.connectedTo = null;
+          }
+        } else {
+          // Không auto roaming, kiểm tra xem trạm cũ có hoạt động
+          if (cli.connectedTo && (!rssiMap[cli.connectedTo] || rssiMap[cli.connectedTo] <= DISCONNECT_RSSI)) {
+            cli.connectedTo = null;
+          }
+        }
+
+        cli.currentRssi = cli.connectedTo && rssiMap[cli.connectedTo] ? rssiMap[cli.connectedTo] : MIN_RSSI;
+
+        // Nhật ký thông tin roaming tự động
+        if (cli.connectedTo !== prevConnectedTo && autoRoam && !isHandulating) {
+          if (!cli.connectedTo) {
+            addLog(
+              'Mất sóng',
+              `Thiết bị ${cli.name} đã văng khỏi vùng phủ sóng (RSSI sụt quá ${DISCONNECT_RSSI}dBm)`,
+              'error'
+            );
+          } else if (!prevConnectedTo) {
+            const nextDev = networkNodes[cli.connectedTo];
+            if (nextDev) {
+              addLog('Kết nối', `Thiết bị ${cli.name} đã gia nhập sóng trạm ${nextDev.name}`, 'success');
+            }
+          } else {
+            const oldDev = networkNodes[prevConnectedTo];
+            const nextDev = networkNodes[cli.connectedTo];
+            if (oldDev && nextDev) {
+              if (oldDev.isMeshEnabled && nextDev.isMeshEnabled) {
+                addLog(
+                  'Auto Roaming (Mesh)',
+                  `Seamless Roaming: Thiết bị ${cli.name} được điều phối mượt từ ${oldDev.name} sang ${nextDev.name} (RSSI cũ: ${rssiMap[oldDev.id]}dBm -> RSSI mới: ${rssiMap[nextDev.id]}dBm)`,
+                  'success'
+                );
+              } else {
+                addLog(
+                  'Đổi WiFi độc lập',
+                  `Thiết bị ${cli.name} đứt mạng tạm thời để kết nối lại vào trạm tốt hơn: ${nextDev.name}`,
+                  'info'
+                );
+              }
+            }
+          }
+        }
+
+        // Kiểm tra xem có đổi dữ liệu để set state không
+        if (
+          cli.connectedTo !== prevConnectedTo ||
+          cli.currentRssi !== prevClients[cliId]?.currentRssi ||
+          JSON.stringify(cli.rssiMap) !== JSON.stringify(prevClients[cliId]?.rssiMap)
+        ) {
+          nextClients[cliId] = cli;
+          changed = true;
+        }
+      });
+
+      return changed ? nextClients : prevClients;
+    });
+  }, [networkNodes, customWalls, autoRoam, isHandulating, addLog]);
+
+  // Chạy cập nhật sóng thời gian thực
+  useEffect(() => {
+    updateNetworkState();
+  }, [networkNodes, customWalls, autoRoam, updateNetworkState]);
+
+  // --- THÊM / XÓA THIẾT BỊ ---
+  const handleAddDevice = (type: DeviceType) => {
+    const id = 'DEV_' + Date.now();
+    let name = '';
+    let icon: 'Server' | 'Layers' | 'Wifi' | 'RouterIcon' = 'Wifi';
+    let colorTheme: 'sky' | 'emerald' | 'slate' | 'purple' = 'purple';
+    let hasWifi = true;
+    const defaultSpecs = { txPower: 20, gain: 3 };
+    let mode: 'router' | 'bridge' = 'bridge';
+    let ssid = 'KTCN_WiFi';
+    let ports = 8;
+    let isMeshEnabled = false;
+    let meshRole: 'controller' | 'agent' = 'agent';
+    let isPoe = false;
+
+    let wanIpMode: 'dhcp' | 'static' = 'dhcp';
+    let wanIp = '';
+    let lanIp = '';
+    let bridgeIpMode: 'dhcp' | 'static' = 'dhcp';
+    let bridgeIp = '';
+
+    switch (type) {
+      case 'isp_modem':
+        name = 'ISP Modem';
+        icon = 'Server';
+        colorTheme = 'sky';
+        hasWifi = true;
+        defaultSpecs.txPower = 18;
+        mode = 'router';
+        ssid = 'KTCN_NhaMang_5G';
+        wanIpMode = 'static';
+        wanIp = '14.225.2.11';
+        lanIp = '192.168.1.1';
+        break;
+      case 'router_wifi':
+        name = 'Router WiFi';
+        icon = 'RouterIcon';
+        colorTheme = 'emerald';
+        hasWifi = true;
+        mode = 'router';
+        ssid = 'KTCN_Router_L3';
+        wanIpMode = 'dhcp';
+        lanIp = '192.168.10.1';
+        break;
+      case 'switch':
+        name = 'Switch LAN';
+        icon = 'Layers';
+        colorTheme = 'slate';
+        hasWifi = false;
+        defaultSpecs.txPower = 0;
+        defaultSpecs.gain = 0;
+        mode = 'bridge';
+        ports = 8;
+        isPoe = false;
+        break;
+      case 'ap':
+        name = 'Access Point AP';
+        icon = 'Wifi';
+        colorTheme = 'purple';
+        hasWifi = true;
+        defaultSpecs.txPower = 20;
+        defaultSpecs.gain = 4;
+        mode = 'bridge';
+        isMeshEnabled = true;
+        meshRole = 'agent';
+        break;
+    }
+
+    const newNode: NetworkNode = {
+      id,
+      type,
+      name,
+      icon,
+      colorTheme,
+      x: 35 + Math.random() * 20,
+      y: 35 + Math.random() * 20,
+      hasWifi,
+      specs: defaultSpecs,
+      mode,
+      ssid,
+      ports,
+      isMeshEnabled,
+      meshRole,
+      uplinkId: 'none',
+      uplinkType: 'wired',
+      isPoe,
+      wanIpMode,
+      wanIp,
+      lanIp,
+      bridgeIpMode,
+      bridgeIp
+    };
+
+    setNetworkNodes(prev => ({ ...prev, [id]: newNode }));
+    addLog('Địa bàn mạng', `Đã lắp thêm thiết bị ${name} thành công.`, 'info');
+  };
+
+  const handleAddClient = () => {
+    const id = 'CLI_' + Date.now();
+    const newClient: ClientNode = {
+      id,
+      name: 'Client ' + (Object.keys(clientNodes).length + 1),
+      type: 'client',
+      x: 40 + Math.random() * 15,
+      y: 40 + Math.random() * 15,
+      connectedTo: null,
+      forceConnect: 'auto',
+      currentRssi: MIN_RSSI,
+      rssiMap: {},
+      ipMode: 'dhcp',
+      ipAddress: '192.168.1.50'
+    };
+
+    setClientNodes(prev => ({ ...prev, [id]: newClient }));
+    addLog('Gia nhập Client', `Thiết bị máy trạm ${newClient.name} đã sẵn sàng bắt sóng.`, 'info');
+  };
+
+  // --- XOÁ TOÀN BỘ TOPOLOGY ---
+  const handleClearAll = () => {
+    setConfirmAction({
+      title: 'Xóa sạch mạng Topology',
+      message: 'Bạn có chắc chắn muốn xóa sạch toàn bộ bản đồ, thiết bị mạng, trạm client và dữ liệu nhật ký không? Thao tác này không thể hoàn tác.',
+      btnText: 'Xóa sạch tất cả',
+      btnColor: 'bg-rose-600 hover:bg-rose-500',
+      onConfirm: () => {
+        setNetworkNodes({});
+        setClientNodes({});
+        setCustomWalls([]);
+        setLogs([]);
+        addLog('Đã dọn dẹp', 'Bản đồ đã được dọn sạch về trạng thái rỗng.', 'warning');
+      }
+    });
+  };
+
+  // --- DRAG & DROP COORDS ---
+  const handleMouseDownNode = (e: React.MouseEvent | React.TouchEvent, id: string) => {
+    if ((e.target as HTMLElement).closest('button')) return;
+    e.preventDefault();
+    setDraggingNodeId(id);
+  };
+
+  const handleMouseMoveRoot = (e: React.MouseEvent | React.TouchEvent) => {
+    let clientX = 0;
+    let clientY = 0;
+    if ('touches' in e) {
+      if (e.touches.length === 0) return;
+      clientX = e.touches[0].clientX;
+      clientY = e.touches[0].clientY;
+    } else {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    }
+
+    // XỬ LÝ PAN CANVAS (Kéo toàn bộ bản đồ)
+    if (isCanvasPanning && canvasRef.current) {
+      const dx = clientX - panStartRef.current.x;
+      const dy = clientY - panStartRef.current.y;
+      setPan({ x: dx, y: dy });
+      return;
+    }
+
+    // XỬ LÝ KÉO THẢ NODE/CLIENT
+    if (draggingNodeId && canvasRef.current) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      let xPercent = ((clientX - rect.left) / rect.width) * 100;
+      let yPercent = ((clientY - rect.top) / rect.height) * 100;
+
+      xPercent = Math.max(0, Math.min(xPercent, 100));
+      yPercent = Math.max(0, Math.min(yPercent, 100));
+
+      if (draggingNodeId.startsWith('CLI_')) {
+        setClientNodes(prev => ({
+          ...prev,
+          [draggingNodeId]: { ...prev[draggingNodeId], x: xPercent, y: yPercent }
+        }));
+      } else {
+        setNetworkNodes(prev => ({
+          ...prev,
+          [draggingNodeId]: { ...prev[draggingNodeId], x: xPercent, y: yPercent }
+        }));
+      }
+      return;
+    }
+
+    // XỬ LÝ VẼ TƯỜNG TRỰC TIẾP TRÊN MẶT BẰNG
+    if (editorLayout === 'custom' && isDrawingStep2 && canvasRef.current) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      let xPercent = ((clientX - rect.left) / rect.width) * 100;
+      let yPercent = ((clientY - rect.top) / rect.height) * 100;
+
+      xPercent = Math.max(0, Math.min(xPercent, 100));
+      yPercent = Math.max(0, Math.min(yPercent, 100));
+
+      if (selectedTool === 'line') {
+        const thickness = 1.5;
+        const dx = xPercent - drawStart.x;
+        const dy = yPercent - drawStart.y;
+        if (Math.abs(dx) > Math.abs(dy)) {
+          setPreviewWall({
+            x: Math.min(drawStart.x, xPercent),
+            y: drawStart.y - thickness / 2,
+            w: Math.abs(dx),
+            h: thickness,
+            type: selectedMaterial
+          });
+        } else {
+          setPreviewWall({
+            x: drawStart.x - thickness / 2,
+            y: Math.min(drawStart.y, yPercent),
+            w: thickness,
+            h: Math.abs(dy),
+            type: selectedMaterial
+          });
+        }
+      } else if (selectedTool === 'rect') {
+        setPreviewWall({
+          x: Math.min(drawStart.x, xPercent),
+          y: Math.min(drawStart.y, yPercent),
+          w: Math.abs(xPercent - drawStart.x),
+          h: Math.abs(yPercent - drawStart.y),
+          type: selectedMaterial
+        });
+      }
+    }
+  };
+
+  const handleMouseUpRoot = (e: React.MouseEvent | React.TouchEvent) => {
+    if (draggingNodeId) {
+      setDraggingNodeId(null);
+    }
+    if (isCanvasPanning) {
+      setIsCanvasPanning(false);
+    }
+  };
+
+  // Click vào Canvas để tạo bắt đầu vẽ tường hoặc tắt chọn
+  const handleCanvasClick = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('.pointer-events-auto') || draggingNodeId) return;
+
+    if (editorLayout === 'custom' && (selectedTool === 'line' || selectedTool === 'rect') && canvasRef.current) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      const xPercent = ((e.clientX - rect.left) / rect.width) * 100;
+      const yPercent = ((e.clientY - rect.top) / rect.height) * 100;
+
+      if (!isDrawingStep2) {
+        setIsDrawingStep2(true);
+        setDrawStart({ x: xPercent, y: yPercent });
+      } else {
+        setIsDrawingStep2(false);
+        if (previewWall && (previewWall.w > 0.5 || previewWall.h > 0.5)) {
+          const nextGroupId = currentDrawGroupId.current++;
+          if (selectedTool === 'line') {
+            setCustomWalls(prev => [
+              ...prev,
+              { ...previewWall, groupId: nextGroupId }
+            ]);
+          } else if (selectedTool === 'rect') {
+            const thickness = 1.5;
+            // Tạo 4 cạnh bao của dầm hình vuông
+            setCustomWalls(prev => [
+              ...prev,
+              { x: previewWall.x, y: previewWall.y, w: previewWall.w, h: thickness, type: selectedMaterial, groupId: nextGroupId },
+              { x: previewWall.x, y: previewWall.y + previewWall.h - thickness, w: previewWall.w, h: thickness, type: selectedMaterial, groupId: nextGroupId },
+              { x: previewWall.x, y: previewWall.y + thickness, w: thickness, h: previewWall.h - 2 * thickness, type: selectedMaterial, groupId: nextGroupId },
+              { x: previewWall.x + previewWall.w - thickness, y: previewWall.y + thickness, w: thickness, h: previewWall.h - 2 * thickness, type: selectedMaterial, groupId: nextGroupId }
+            ]);
+          }
+        }
+        setPreviewWall(null);
+      }
+    }
+  };
+
+  // --- XÓA TƯỜNG (CỤC TẨY) ---
+  const handleEraserClickWall = (e: React.MouseEvent, wallIdx: number, groupId: number) => {
+    if (selectedTool === 'eraser' && editorLayout === 'custom') {
+      e.stopPropagation();
+      setCustomWalls(prev => prev.filter(w => w.groupId !== groupId));
+      addLog('Xóa vật cản', 'Đã loại bỏ bức tường cách âm/chặn sóng.', 'info');
+    }
+  };
+
+  // --- ROAMING THỦ CÔNG (KÍCH HOẠT PHÂN TÍCH) ---
+  const handleManualRoamToggle = () => {
+    const clients = Object.values(clientNodes) as ClientNode[];
+    if (clients.length === 0 || isHandulating) return;
+
+    const cli = clients[0];
+    if (!cli.connectedTo) {
+      addLog('Yêu cầu roaming', 'Điện thoại hiện tại không kết nối với bất kỳ Wi-Fi nào, không thể roaming.', 'warning');
+      return;
+    }
+
+    const currentAp = networkNodes[cli.connectedTo];
+    let bestApId: string | null = null;
+    let maxRssiValue = -Infinity;
+
+    (Object.values(networkNodes) as NetworkNode[]).forEach(dev => {
+      if (dev.hasWifi && dev.id !== cli.connectedTo && cli.rssiMap[dev.id] > maxRssiValue) {
+        maxRssiValue = cli.rssiMap[dev.id];
+        bestApId = dev.id;
+      }
+    });
+
+    if (!bestApId || maxRssiValue < DISCONNECT_RSSI) {
+      addLog(
+        'Đạt tối ưu',
+        `Sóng hiện tại từ ${currentAp?.name} đang là sự lựa chọn tốt nhất. Không phát hiện trạm phụ nào tốt hơn.`,
+        'success'
+      );
+      return;
+    }
+
+    const targetAp = networkNodes[bestApId];
+    const isMesh = currentAp?.isMeshEnabled && targetAp?.isMeshEnabled;
+
+    setIsHandulating(true);
+    setAutoRoam(false); // Buộc khóa auto roam tạm thời để biểu thị
+    addLog(
+      'Kích hoạt roaming',
+      `Đang điều hướng roaming cưỡng bức từ ${currentAp?.name} (${cli.currentRssi}dBm) -> ${targetAp?.name} (${maxRssiValue}dBm). Vui lòng đợi cấu hình...`,
+      'info'
+    );
+
+    setTimeout(() => {
+      setClientNodes(prev => {
+        if (!prev[cli.id] || !bestApId) return prev;
+        return {
+          ...prev,
+          [cli.id]: {
+            ...prev[cli.id],
+            connectedTo: bestApId,
+            currentRssi: maxRssiValue
+          }
+        };
+      });
+
+      if (isMesh) {
+        addLog(
+          'Roaming (Mesh)',
+          `Phối hợp Controller: ${cli.name} đã chuyển vùng sang AP ${targetAp?.name} thành công trong 15ms (Không mất gói).`,
+          'success'
+        );
+      } else {
+        addLog(
+          'Chuyển mạng độc lập',
+          `Quá trình ngắt mạng, bắt SSID ${targetAp?.name} hoàn tất. Gián đoạn 2200ms kết nối IP.`,
+          'warning'
+        );
+      }
+      setIsHandulating(false);
+      setAutoRoam(true);
+    }, 2000);
+  };
+
+  // --- OPEN MODAL SETTINGS ---
+  const handleOpenSettings = (id: string) => {
+    const isClient = id.startsWith('CLI_');
+    const dev = isClient ? clientNodes[id] : networkNodes[id];
+    if (!dev) return;
+
+    setSelectedNodeId(id);
+
+    if (isClient) {
+      const client = dev as ClientNode;
+      setModalData({
+        name: client.name,
+        mode: 'bridge',
+        wanIpMode: 'dhcp',
+        wanIp: '',
+        lanIp: '',
+        bridgeIpMode: 'dhcp',
+        bridgeIp: '',
+        ssid: '',
+        ports: 0,
+        isMeshEnabled: false,
+        meshRole: 'agent',
+        uplinkId: 'none',
+        uplinkType: 'wired',
+        isPoe: false,
+        txPower: 0,
+        gain: 0,
+        forceConnect: client.forceConnect,
+        ipMode: client.ipMode,
+        ipAddress: client.ipAddress,
+        hasWifi: false
+      });
+    } else {
+      const node = dev as NetworkNode;
+      setModalData({
+        name: node.name,
+        mode: node.mode,
+        wanIpMode: node.wanIpMode,
+        wanIp: node.wanIp,
+        lanIp: node.lanIp,
+        bridgeIpMode: node.bridgeIpMode,
+        bridgeIp: node.bridgeIp,
+        ssid: node.ssid,
+        ports: node.ports,
+        isMeshEnabled: node.isMeshEnabled,
+        meshRole: node.meshRole,
+        uplinkId: node.uplinkId,
+        uplinkType: node.uplinkType,
+        isPoe: node.isPoe,
+        txPower: node.specs.txPower,
+        gain: node.specs.gain,
+        forceConnect: 'auto',
+        ipMode: 'dhcp',
+        ipAddress: '',
+        hasWifi: node.hasWifi
+      });
+    }
+  };
+
+  const handleSaveModal = () => {
+    if (!selectedNodeId || !modalData) return;
+
+    const isClient = selectedNodeId.startsWith('CLI_');
+
+    if (isClient) {
+      setClientNodes(prev => ({
+        ...prev,
+        [selectedNodeId]: {
+          ...prev[selectedNodeId],
+          name: modalData.name,
+          forceConnect: modalData.forceConnect,
+          ipMode: modalData.ipMode,
+          ipAddress: modalData.ipAddress,
+          connectedTo: modalData.forceConnect === 'auto' ? prev[selectedNodeId].connectedTo : modalData.forceConnect
+        }
+      }));
+      addLog('Cập nhật Client', `Đã lưu cấu hình IP/Kết nối cho trạm ${modalData.name}`, 'info');
+    } else {
+      setNetworkNodes(prev => ({
+        ...prev,
+        [selectedNodeId]: {
+          ...prev[selectedNodeId],
+          name: modalData.name,
+          mode: modalData.mode,
+          wanIpMode: modalData.wanIpMode,
+          wanIp: modalData.wanIp,
+          lanIp: modalData.lanIp,
+          bridgeIpMode: modalData.bridgeIpMode,
+          bridgeIp: modalData.bridgeIp,
+          ssid: modalData.ssid,
+          ports: modalData.ports,
+          isMeshEnabled: modalData.isMeshEnabled,
+          meshRole: modalData.meshRole,
+          uplinkId: modalData.uplinkId,
+          uplinkType: modalData.uplinkType,
+          isPoe: modalData.isPoe,
+          hasWifi: modalData.hasWifi,
+          specs: {
+            txPower: modalData.txPower,
+            gain: modalData.gain
+          }
+        }
+      }));
+      addLog('Cập nhật Thiết bị', `Đã lưu cấu hình mạng/SSID đầy đủ cho ${modalData.name}`, 'info');
+    }
+
+    setSelectedNodeId(null);
+    setModalData(null);
+  };
+
+  const handleDeleteNode = (id: string) => {
+    const isClient = id.startsWith('CLI_');
+    const nodeName = isClient ? clientNodes[id]?.name : networkNodes[id]?.name;
+
+    setConfirmAction({
+      title: 'Gỡ bỏ thiết bị',
+      message: `Bạn có chắc chắn muốn gỡ bỏ thiết bị "${nodeName || 'này'}" khỏi hệ thống bản đồ mạng quy hoạch?`,
+      btnText: 'Gỡ thiết bị',
+      btnColor: 'bg-rose-600 hover:bg-rose-500',
+      onConfirm: () => {
+        if (isClient) {
+          setClientNodes(prev => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+        } else {
+          setNetworkNodes(prev => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+          // Reset uplink liên quan
+          setNetworkNodes(prev => {
+            const next = { ...prev };
+            Object.keys(next).forEach(k => {
+              if (next[k].uplinkId === id) {
+                next[k] = { ...next[k], uplinkId: 'none' };
+              }
+            });
+            return next;
+          });
+          // Reset liên kết client liên kết tới AP bị xóa
+          setClientNodes(prev => {
+            const next = { ...prev };
+            Object.keys(next).forEach(k => {
+              if (next[k].connectedTo === id) {
+                next[k] = { ...next[k], connectedTo: null };
+              }
+              if (next[k].forceConnect === id) {
+                next[k] = { ...next[k], forceConnect: 'auto' };
+              }
+            });
+            return next;
+          });
+        }
+        setSelectedNodeId(null);
+        setModalData(null);
+        addLog('Gỡ thiết bị', `Đã dỡ bỏ thiết bị mạng "${nodeName || ''}" khỏi không gian mô phỏng.`, 'warning');
+      }
+    });
+  };
+
+  // --- LỰA CHỌN MẶT BẰNG MẪU ---
+  const handleLayoutTemplateChange = (layout: 'none' | 'custom') => {
+    setEditorLayout(layout);
+    if (layout === 'none') {
+      setCustomWalls([]);
+      setSelectedTool('pan');
+    } else {
+      setCustomWalls(defaultWalls);
+      setSelectedTool('line');
+    }
+  };
+
+  const getThemeColors = (theme: 'sky' | 'emerald' | 'slate' | 'purple') => {
+    const themes = {
+      sky: { text: 'text-sky-400', border: 'border-sky-400', hex: '#38bdf8', bg: 'bg-sky-500/20' },
+      emerald: { text: 'text-emerald-400', border: 'border-emerald-400', hex: '#10b981', bg: 'bg-emerald-500/20' },
+      slate: { text: 'text-slate-300', border: 'border-slate-500', hex: '#94a3b8', bg: 'bg-slate-505/20' },
+      purple: { text: 'text-purple-400', border: 'border-purple-400', hex: '#c084fc', bg: 'bg-purple-500/20' }
+    };
+    return themes[theme] || themes.slate;
+  };
+
+  return (
+    <div
+      className="min-h-screen p-4 flex flex-col items-center select-none overflow-hidden"
+      onMouseMove={handleMouseMoveRoot}
+      onTouchMove={handleMouseMoveRoot}
+      onMouseUp={handleMouseUpRoot}
+      onTouchEnd={handleMouseUpRoot}
+    >
+      {/* 1. Header */}
+      <div className="w-full max-w-[1400px] mb-3 flex flex-col md:flex-row justify-between items-start md:items-center gap-2">
+        <div>
+          <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-sky-400 via-indigo-400 to-emerald-400">
+            KTCN Wi-Fi Network & Roaming Simulation
+          </h1>
+          <p className="text-slate-400 text-xs mt-0.5">
+            Mô phỏng mạng Layer 3 - Topology - Định dạng IP DHCP - Chuyển vùng Seamless Roaming (Mesh)
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={handleClearAll}
+            className="px-3 py-1.5 bg-rose-955/40 text-rose-300 hover:bg-rose-900 border border-rose-800 text-xs rounded transition flex items-center gap-1 font-semibold cursor-pointer"
+          >
+            <Trash2 className="w-3.5 h-3.5" /> Xóa sạch Topology
+          </button>
+        </div>
+      </div>
+
+      {/* 2. Main Interface Layout */}
+      <div className="w-full max-w-[1400px] flex gap-4 relative">
+        {/* Sidebar điều chỉnh bên trái */}
+        <div className="relative flex shrink-0 z-40">
+          <div
+            id="sidebar"
+            className={`${
+              isSidebarOpen ? 'w-64' : 'w-0 overflow-hidden opacity-0 pointer-events-none'
+            } flex flex-col gap-3 transition-all duration-300 pr-1 max-h-[820px] overflow-y-auto custom-scrollbar`}
+          >
+            {/* Module 1: Thêm Thiết Bị */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-lg shadow-lg">
+              <div className="px-3 py-2 border-b border-slate-800 font-bold text-xs text-sky-400 flex items-center gap-1.5 uppercase tracking-wider">
+                <Database className="w-3.5 h-3.5 text-sky-400 animate-pulse" /> Kho Thiết Bị KTCN
+              </div>
+              <div className="p-2 flex flex-col gap-1.5">
+                <button
+                  onClick={() => handleAddDevice('isp_modem')}
+                  className="w-full bg-slate-800 hover:bg-slate-750 border border-slate-700 text-slate-200 py-1.5 rounded text-[11px] font-semibold transition flex items-center gap-2 px-2.5 cursor-pointer"
+                >
+                  <Server className="w-4 h-4 text-sky-400" /> Modem / Gateway Router
+                </button>
+                <button
+                  onClick={() => handleAddDevice('router_wifi')}
+                  className="w-full bg-slate-800 hover:bg-slate-755 border border-slate-700 text-slate-200 py-1.5 rounded text-[11px] font-semibold transition flex items-center gap-2 px-2.5 cursor-pointer"
+                >
+                  <RouterIcon className="w-4 h-4 text-emerald-400" /> Router WiFi nhánh
+                </button>
+                <button
+                  onClick={() => handleAddDevice('switch')}
+                  className="w-full bg-slate-800 hover:bg-slate-755 border border-slate-700 text-slate-200 py-1.5 rounded text-[11px] font-semibold transition flex items-center gap-2 px-2.5 cursor-pointer"
+                >
+                  <Layers className="w-4 h-4 text-slate-400" /> Switch LAN trung chuyển
+                </button>
+                <button
+                  onClick={() => handleAddDevice('ap')}
+                  className="w-full bg-slate-800 hover:bg-slate-755 border border-slate-700 text-slate-200 py-1.5 rounded text-[11px] font-semibold transition flex items-center gap-2 px-2.5 cursor-pointer"
+                >
+                  <Wifi className="w-4 h-4 text-purple-400" /> Access Point (Phát Sóng)
+                </button>
+
+                <div className="h-[1px] bg-slate-800 my-1"></div>
+                <button
+                  onClick={handleAddClient}
+                  className="w-full bg-indigo-950/60 hover:bg-indigo-900 text-indigo-300 border border-indigo-850 py-1.5 rounded text-[11px] font-semibold transition flex items-center gap-2 px-2.5 cursor-pointer"
+                >
+                  <Smartphone className="w-4 h-4 text-indigo-400 animate-bounce" /> Thêm Client Máy Trạm
+                </button>
+              </div>
+            </div>
+
+            {/* Module 2: Môi trường / Tường phản cản */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-lg shadow-lg">
+              <div
+                onClick={() => setIsSidebarEnvOpen(!isSidebarEnvOpen)}
+                className="px-3 py-2 border-b border-slate-800 font-bold text-xs text-amber-400 flex justify-between items-center cursor-pointer hover:bg-slate-800/40 select-none uppercase tracking-wider"
+              >
+                <span className="flex items-center gap-1.5">
+                  <Database className="w-3.5 h-3.5 text-amber-500" /> Mặt Bằng & Vẽ Tường
+                </span>
+                {isSidebarEnvOpen ? <ChevronUp className="w-3 h-3 text-slate-500" /> : <ChevronDown className="w-3 h-3 text-slate-500" />}
+              </div>
+
+              {isSidebarEnvOpen && (
+                <div className="p-2 flex flex-col gap-2">
+                  {/* Lựa chọn mặt bằng mẫu */}
+                  <div className="grid grid-cols-2 gap-1 text-[10px]">
+                    <button
+                      onClick={() => handleLayoutTemplateChange('none')}
+                      className={`py-1 rounded border font-semibold transition cursor-pointer ${
+                        editorLayout === 'none'
+                          ? 'bg-blue-600 border-blue-500 text-white'
+                          : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-750'
+                      }`}
+                    >
+                      Bản đồ Trống
+                    </button>
+                    <button
+                      onClick={() => handleLayoutTemplateChange('custom')}
+                      className={`py-1 rounded border font-semibold transition cursor-pointer ${
+                        editorLayout === 'custom'
+                          ? 'bg-amber-600 border-amber-500 text-white'
+                          : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-750'
+                      }`}
+                    >
+                      Bản vẽ Tường
+                    </button>
+                  </div>
+
+                  {editorLayout === 'custom' && (
+                    <div className="flex flex-col gap-2 pt-1 border-t border-slate-802">
+                      {/* Công cụ vẽ */}
+                      <label className="text-[9px] font-bold text-slate-500 uppercase">Công Cụ Vẽ Vật Cản</label>
+                      <div className="grid grid-cols-4 gap-1 text-[9px]">
+                        <button
+                          onClick={() => {
+                            setSelectedTool('pan');
+                            setIsDrawingStep2(false);
+                            setPreviewWall(null);
+                          }}
+                          className={`py-1 rounded border transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                            selectedTool === 'pan' ? 'bg-slate-700 border-slate-500 text-white font-bold' : 'bg-slate-800 border-slate-700/60 text-slate-400 hover:bg-slate-750'
+                          }`}
+                        >
+                          <Hand className="w-3 h-3" /> Kéo
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectedTool('line');
+                            setIsDrawingStep2(false);
+                            setPreviewWall(null);
+                          }}
+                          className={`py-1 rounded border transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                            selectedTool === 'line' ? 'bg-indigo-950 text-indigo-300 border-indigo-650 font-bold shadow' : 'bg-slate-800 border-slate-700/60 text-slate-400 hover:bg-slate-750'
+                          }`}
+                        >
+                          <div className="w-4 h-0.5 bg-current my-1"></div> Đường
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectedTool('rect');
+                            setIsDrawingStep2(false);
+                            setPreviewWall(null);
+                          }}
+                          className={`py-1 rounded border transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                            selectedTool === 'rect' ? 'bg-purple-955 text-purple-300 border-purple-650 font-bold shadow' : 'bg-slate-800 border-slate-700/60 text-slate-400 hover:bg-slate-750'
+                          }`}
+                        >
+                          <div className="w-3.5 h-3.5 border-2 border-current rounded-sm"></div> Khung
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectedTool('eraser');
+                            setIsDrawingStep2(false);
+                            setPreviewWall(null);
+                          }}
+                          className={`py-1 rounded border transition flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                            selectedTool === 'eraser' ? 'bg-rose-955 text-rose-300 border-rose-650 font-bold shadow' : 'bg-slate-800 border-slate-700/60 text-slate-400 hover:bg-slate-750'
+                          }`}
+                        >
+                          <Trash2 className="w-3 h-3" /> Xóa
+                        </button>
+                      </div>
+
+                      {/* Vật liệu tường chặn sóng */}
+                      {(selectedTool === 'line' || selectedTool === 'rect') && (
+                        <>
+                          <label className="text-[9px] font-bold text-slate-500 uppercase mt-0.5">Chọn Vật Liệu Chặn Sóng</label>
+                          <div className="flex flex-col gap-1">
+                            <button
+                              onClick={() => setSelectedMaterial('brick')}
+                              className={`px-2 py-1 rounded text-[10px] border flex justify-between items-center transition cursor-pointer ${
+                                selectedMaterial === 'brick' ? 'bg-red-955/60 border-red-500 text-red-200 font-bold shadow' : 'bg-slate-800 border-slate-700/60 text-slate-400'
+                              }`}
+                            >
+                              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 bg-red-800 rounded"></span> Tường Gạch</span>
+                              <span>-8 dBm</span>
+                            </button>
+                            <button
+                              onClick={() => setSelectedMaterial('concrete')}
+                              className={`px-2 py-1 rounded text-[10px] border flex justify-between items-center transition cursor-pointer ${
+                                selectedMaterial === 'concrete' ? 'bg-slate-700 border-slate-500 text-slate-200 font-bold shadow' : 'bg-slate-800 border-slate-700/60 text-slate-400'
+                              }`}
+                            >
+                              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 bg-slate-500 rounded"></span> Bê Tông Cốt Thép</span>
+                              <span>-15 dBm</span>
+                            </button>
+                            <button
+                              onClick={() => setSelectedMaterial('glass')}
+                              className={`px-2 py-1 rounded text-[10px] border flex justify-between items-center transition cursor-pointer ${
+                                selectedMaterial === 'glass' ? 'bg-cyan-955/60 border-cyan-500 text-cyan-200 font-bold shadow' : 'bg-slate-800 border-slate-700/60 text-slate-400'
+                              }`}
+                            >
+                              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 bg-cyan-700 border border-cyan-400 rounded-sm"></span> Vách Kính</span>
+                              <span>-2 dBm</span>
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Module 3: Mô Phỏng Roaming & Sự Kiện */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-lg shadow-lg flex-grow flex flex-col min-h-[250px]">
+              <div
+                onClick={() => setIsSidebarRoamOpen(!isSidebarRoamOpen)}
+                className="px-3 py-2 border-b border-slate-805 font-bold text-xs text-emerald-400 flex justify-between items-center cursor-pointer hover:bg-slate-800/40 select-none uppercase tracking-wider"
+              >
+                <span className="flex items-center gap-1.5">
+                  <Play className="w-3.5 h-3.5" /> Giả lập Roaming
+                </span>
+                {isSidebarRoamOpen ? <ChevronUp className="w-3 h-3 text-slate-500" /> : <ChevronDown className="w-3 h-3 text-slate-500" />}
+              </div>
+
+              {isSidebarRoamOpen && (
+                <div className="p-2 flex flex-col flex-grow gap-2 min-h-0">
+                  {/* Nút Auto Roam Toggle */}
+                  <div className="flex items-center justify-between bg-slate-950/60 px-2 py-1.5 rounded border border-slate-800">
+                    <span className="text-[10px] font-bold text-slate-300">Tự Động Roaming</span>
+                    <button
+                      onClick={() => setAutoRoam(!autoRoam)}
+                      className="w-9 h-5 rounded-full transition-colors relative flex items-center bg-slate-700 cursor-pointer"
+                      style={{ backgroundColor: autoRoam ? '#10b981' : '#475569' }}
+                    >
+                      <span
+                        className="w-3.5 h-3.5 bg-white rounded-full shadow absolute transition-transform"
+                        style={{ transform: autoRoam ? 'translateX(18px)' : 'translateX(4px)' }}
+                      />
+                    </button>
+                  </div>
+
+                  {/* Nút Manual Roam */}
+                  <button
+                    onClick={handleManualRoamToggle}
+                    disabled={isHandulating}
+                    className="w-full bg-indigo-650 hover:bg-indigo-600 disabled:opacity-50 text-white font-bold py-2 rounded text-[11px] transition flex justify-center items-center gap-1.5 shadow cursor-pointer animate-pulse"
+                  >
+                    {isHandulating ? (
+                      <span className="inline-block animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white"></span>
+                    ) : (
+                      <Wifi className="w-3.5 h-3.5 text-indigo-300" />
+                    )}
+                    {isHandulating ? 'Đang Chuyển Vùng...' : 'Yêu Cầu Roaming Lập Tức'}
+                  </button>
+
+                  <div className="h-[1px] bg-slate-800 my-1"></div>
+
+                  {/* Phần logs hạt nhân */}
+                  <div className="flex justify-between items-center">
+                    <span className="text-[9px] text-slate-500 font-bold uppercase">Nhật Ký Chuyển Vùng</span>
+                    <button
+                      onClick={() => setLogs([])}
+                      className="text-[9px] text-rose-450 hover:text-rose-300 font-bold uppercase flex items-center gap-0.5 transition cursor-pointer"
+                    >
+                      <Trash2 className="w-3 h-3" /> Xóa
+                    </button>
+                  </div>
+
+                  <div className="flex-grow overflow-y-auto custom-scrollbar flex flex-col gap-1.5 max-h-[220px] min-h-[120px] select-text">
+                    {logs.length === 0 ? (
+                      <div className="text-[10px] italic text-slate-500 text-center py-6">
+                        Không có sự kiện mạng nào gần đây...
+                      </div>
+                    ) : (
+                      logs.map(log => {
+                        const types = {
+                          success: 'text-emerald-300 border-emerald-900 bg-emerald-950/20',
+                          warning: 'text-amber-305 border-amber-900 bg-amber-955/20',
+                          error: 'text-rose-300 border-rose-900 bg-rose-955/20',
+                          info: 'text-slate-300 border-slate-800 bg-slate-900/40'
+                        };
+                        return (
+                          <div
+                            key={log.id}
+                            className={`p-1.5 border rounded text-[10px] leading-relaxed transition ${types[log.type]}`}
+                          >
+                            <div className="flex justify-between items-center mb-0.5 border-b border-white/5 pb-0.5">
+                              <span className="font-bold flex items-center gap-1">
+                                {log.type === 'error' && <AlertTriangle className="w-2.5 h-2.5" />}
+                                {log.title}
+                              </span>
+                              <span className="text-[8px] opacity-40">{log.timestamp}</span>
+                            </div>
+                            <div className="opacity-90">{log.desc}</div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Drawer trigger toggle button */}
+          <button
+            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            className="absolute left-full top-4 z-50 bg-slate-900 hover:bg-slate-800 border-y border-r border-slate-800 w-6 h-10 rounded-r flex items-center justify-center text-slate-400 transition cursor-pointer"
+          >
+            {isSidebarOpen ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+          </button>
+        </div>
+
+        {/* 3. SIMULATION CANVAS AREA */}
+        <div className="flex-grow flex flex-col min-w-0">
+          <div
+            id="sim-canvas"
+            ref={canvasRef}
+            onClick={handleCanvasClick}
+            className={`w-full h-[760px] bg-[#02050e] rounded-xl overflow-hidden border border-slate-850 relative ${
+              selectedTool === 'pan' ? 'cursor-grab' : selectedTool === 'eraser' ? 'cursor-alias' : 'cursor-crosshair'
+            }`}
+          >
+            {/* Thanh công cụ zoom góc phải */}
+            <div className="absolute top-4 right-4 z-40 bg-slate-900/95 backdrop-blur-md p-1 border border-slate-805 rounded-lg flex flex-col gap-1 shadow-lg pointer-events-auto">
+              <button
+                onClick={() => setZoom(z => Math.min(2, z + 0.1))}
+                className="w-7 h-7 bg-slate-850 hover:bg-sky-500 rounded flex items-center justify-center text-slate-300 transition cursor-pointer"
+                title="Bóng bẩy phóng to"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => {
+                  setZoom(1);
+                  setPan({ x: 0, y: 0 });
+                }}
+                className="w-7 h-7 bg-slate-850 hover:bg-sky-550 rounded flex items-center justify-center text-[10px] text-slate-300 font-bold transition cursor-pointer"
+                title="Trả về 1x"
+              >
+                1x
+              </button>
+              <button
+                onClick={() => setZoom(z => Math.max(0.5, z - 0.1))}
+                className="w-7 h-7 bg-slate-855 hover:bg-sky-500 rounded flex items-center justify-center text-slate-300 transition cursor-pointer"
+                title="Thu nhỏ không gian"
+              >
+                <Minus className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Backdrop Zooming & Panning Wrapper */}
+            <div
+              className="absolute inset-0 origin-center transition-transform duration-75"
+              style={{
+                transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`
+              }}
+              onMouseDown={(e) => {
+                if (selectedTool === 'pan' && !(e.target as HTMLElement).closest('.pointer-events-auto')) {
+                  setIsCanvasPanning(true);
+                  panStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
+                }
+              }}
+            >
+              {/* Grid hình dạng nền mờ ảo */}
+              <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.015)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.015)_1px,transparent_1px)] bg-[size:25px_25px] opacity-100 pointer-events-none"></div>
+
+              {/* LAYER 1: Sóng Phủ Coverage (AP Wi-Fi) */}
+              <div id="coverage-layer" className="absolute inset-0 pointer-events-none opacity-50">
+                {networkNodeList.map(dev => {
+                  if (!dev.hasWifi) return null;
+                  const maxLoss = dev.specs.txPower + dev.specs.gain + 85;
+                  const logDist = (maxLoss - 46) / 30;
+                  const maxDistMet = Math.pow(10, logDist);
+
+                  const col = getThemeColors(dev.colorTheme);
+                  const diamPercentage = (maxDistMet / CANVAS_WIDTH_METERS) * 100 * 2 * 0.7;
+
+                  return (
+                    <div
+                      key={`cov-${dev.id}`}
+                      className="absolute rounded-full -translate-x-1/2 -translate-y-1/2 select-none pulse-coverage"
+                      style={{
+                        left: `${dev.x}%`,
+                        top: `${dev.y}%`,
+                        width: `${diamPercentage}%`,
+                        height: `${diamPercentage}%`,
+                        background: `radial-gradient(circle, ${col.hex}22 0%, ${col.hex}08 55%, transparent 100%)`,
+                        border: `1px dashed ${col.hex}30`
+                      }}
+                    />
+                  );
+                })}
+              </div>
+
+              {/* LAYER 2: Tường Phản Kháng Chắn Sóng */}
+              <div id="walls-container" className="absolute inset-0 z-10 pointer-events-none">
+                {customWalls.map((w, idx) => {
+                  const materialsClass = {
+                    brick: 'wall-brick border border-red-900',
+                    concrete: 'wall-concrete border border-slate-750',
+                    glass: 'wall-glass'
+                  };
+                  return (
+                    <div
+                      key={`wall-${idx}`}
+                      onClick={(e) => handleEraserClickWall(e, idx, w.groupId)}
+                      className={`absolute ${materialsClass[w.type]} ${
+                        selectedTool === 'eraser' ? 'hover:brightness-150 hover:scale-[1.01] pointer-events-auto cursor-pointer border-red-500' : ''
+                      }`}
+                      style={{
+                        left: `${w.x}%`,
+                        top: `${w.y}%`,
+                        width: `${w.w}%`,
+                        height: `${w.h}%`
+                      }}
+                      title={`${w.type === 'brick' ? 'Tường Gạch (-8dB)' : w.type === 'concrete' ? 'Bê tông (-15dB)' : 'Vách kính (-2dB)'}. ${
+                        selectedTool === 'eraser' ? 'Click để xóa!' : ''
+                      }`}
+                    />
+                  );
+                })}
+
+                {/* Khung xem trước khi vẽ tường */}
+                {previewWall && (
+                  <div
+                    className="absolute wall-preview pointer-events-none border-2 border-dashed border-amber-500 bg-amber-500/20"
+                    style={{
+                      left: `${previewWall.x}%`,
+                      top: `${previewWall.y}%`,
+                      width: `${previewWall.w}%`,
+                      height: `${previewWall.h}%`
+                    }}
+                  />
+                )}
+              </div>
+
+              {/* LAYER 3: ĐƯỜNG LIÊN KẾT WIRELESS / WIRED BACKHAUL & WIFI TRUY VẾT SVG */}
+              <div className="absolute inset-0 pointer-events-none z-5">
+                <svg className="absolute inset-0 w-full h-full" style={{ overflow: 'visible' }}>
+                  {/* Vẽ đường truyền tải Cáp (Wired Backhaul) / Mesh Link (Wireless Backhaul) giữa AP */}
+                  {networkNodeList.map(dev => {
+                    if (dev.uplinkId === 'none' || !networkNodes[dev.uplinkId]) return null;
+                    const parent = networkNodes[dev.uplinkId] as NetworkNode;
+
+                    if (dev.uplinkType === 'wired') {
+                      return (
+                        <g key={`backhaul-${dev.id}`}>
+                          <line
+                            x1={`${parent.x}%`}
+                            y1={`${parent.y}%`}
+                            x2={`${dev.x}%`}
+                            y2={`${dev.y}%`}
+                            stroke="#3b82f6"
+                            strokeWidth="3.5"
+                            strokeLinecap="round"
+                            opacity="0.8"
+                            style={{ filter: 'drop-shadow(0px 0px 3px rgba(59, 130, 246, 0.4))' }}
+                          />
+                        </g>
+                      );
+                    } else {
+                      return (
+                        <g key={`backhaul-${dev.id}`}>
+                          <line
+                            x1={`${parent.x}%`}
+                            y1={`${parent.y}%`}
+                            x2={`${dev.x}%`}
+                            y2={`${dev.y}%`}
+                            stroke="#10b981"
+                            strokeWidth="2.5"
+                            strokeDasharray="6,6"
+                            strokeLinecap="round"
+                            opacity="0.9"
+                            style={{
+                              filter: 'drop-shadow(0px 0px 4px rgba(16, 185, 129, 0.5))'
+                            }}
+                          />
+                        </g>
+                      );
+                    }
+                  })}
+
+                  {/* Vẽ đường kết nối Wi-Fi Client đối với trạm đang liên kết */}
+                  {clientNodeList.map(cli => {
+                    if (!cli.connectedTo || !networkNodes[cli.connectedTo] || cli.currentRssi <= DISCONNECT_RSSI) return null;
+                    const ap = networkNodes[cli.connectedTo] as NetworkNode;
+                    const col = getThemeColors(ap.colorTheme);
+
+                    return (
+                      <line
+                        key={`wifi-line-${cli.id}`}
+                        x1={`${ap.x}%`}
+                        y1={`${ap.y}%`}
+                        x2={`${cli.x}%`}
+                        y2={`${cli.y}%`}
+                        stroke={col.hex}
+                        strokeWidth="2"
+                        strokeDasharray="4,6"
+                        strokeLinecap="round"
+                        opacity="0.75"
+                        style={{
+                          filter: `drop-shadow(0px 0px 3px ${col.hex}60)`
+                        }}
+                      />
+                    );
+                  })}
+                </svg>
+              </div>
+
+              {/* LAYER 4: THIẾT BỊ MẠNG (NODES CONTAINER) */}
+              <div id="nodes-layer" className="absolute inset-0 z-20 pointer-events-none">
+                {networkNodeList.map(dev => {
+                  const col = getThemeColors(dev.colorTheme);
+
+                  const renderIcon = () => {
+                    switch (dev.icon) {
+                      case 'Server':
+                        return <Server className={`w-5 h-5 ${col.text}`} />;
+                      case 'Layers':
+                        return <Layers className={`w-5 h-5 ${col.text}`} />;
+                      case 'Wifi':
+                        return <Wifi className={`w-5 h-5 ${col.text}`} />;
+                      case 'RouterIcon':
+                        return <RouterIcon className={`w-5 h-5 ${col.text}`} />;
+                      default:
+                        return <Wifi className={`w-5 h-5 ${col.text}`} />;
+                    }
+                  };
+
+                  let subnetText = '';
+                  if (dev.mode === 'router') {
+                    const actualWan = dev.wanIpMode === 'dhcp' ? 'DHCP WAN' : (dev.wanIp || 'Dải WAN IP');
+                    subnetText = (
+                      <div className="flex flex-col items-center w-full mt-0.5 border-t border-slate-800/40 pt-0.5 text-[8px] leading-tight text-slate-400 font-mono">
+                        <span className="text-sky-400 text-center truncate w-[90px]">W: {actualWan}</span>
+                        <span className="text-emerald-400">L: {dev.lanIp || 'Chưa định LAN'}</span>
+                      </div>
+                    );
+                  } else {
+                    const actualIp = dev.bridgeIpMode === 'dhcp' ? getDHCPAddressForNode(dev) : (dev.bridgeIp || '191.168.1.20');
+                    subnetText = (
+                      <div className="text-[8.5px] text-slate-400 font-mono mt-0.5">
+                        IP: {actualIp}
+                      </div>
+                    );
+                  }
+
+                  let detailSsidBadge = '';
+                  if (dev.hasWifi) {
+                    if (dev.isMeshEnabled) {
+                      detailSsidBadge = (
+                        <div className="mt-1 flex flex-col items-center gap-0.5">
+                          {dev.meshRole === 'controller' ? (
+                            <span className="bg-indigo-900/40 text-indigo-300 font-bold px-1 py-0.5 rounded text-[8px] border border-indigo-700/60 leading-none">
+                              Mesh CTRL
+                            </span>
+                          ) : (
+                            <span className="bg-slate-800/80 text-indigo-300 font-bold px-1 py-0.5 rounded text-[8px] border border-indigo-900/60 leading-none">
+                              Mesh AGENT
+                            </span>
+                          )}
+                          <span className="text-[8px] text-slate-350 max-w-[85px] truncate mt-0.5" title={dev.ssid}>
+                            SSID: {dev.ssid}
+                          </span>
+                        </div>
+                      );
+                    } else {
+                      detailSsidBadge = (
+                        <div className="mt-1 flex flex-col items-center">
+                          <span className="bg-sky-955/40 text-sky-400 px-1 py-0.5 rounded text-[8px] border border-sky-800/50 leading-none">
+                            AP AP-Mode
+                          </span>
+                          <span className="text-[8px] text-slate-355 max-w-[85px] truncate mt-0.5">
+                            SSID: {dev.ssid}
+                          </span>
+                        </div>
+                      );
+                    }
+                  } else {
+                    const poeLabel = dev.isPoe ? <span className="text-amber-400 font-bold shrink-0">PoE ✓</span> : '';
+                    subnetText = (
+                      <div className="text-[8.5px] text-slate-400 font-mono mt-0.5 flex items-center gap-1">
+                        <span>{dev.ports}P</span> {poeLabel}
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div
+                      key={dev.id}
+                      className="absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center draggable-node pointer-events-auto"
+                      style={{
+                        left: `${dev.x}%`,
+                        top: `${dev.y}%`
+                      }}
+                      onMouseDown={(e) => handleMouseDownNode(e, dev.id)}
+                      onTouchStart={(e) => handleMouseDownNode(e, dev.id)}
+                    >
+                      <div
+                        className={`w-11 h-11 bg-slate-900 rounded-xl flex items-center justify-center border-2 ${
+                          col.border
+                        } shadow-[0_4px_16px_rgba(0,0,0,0.6)] z-10 relative cursor-grab active:cursor-grabbing transition-transform ${
+                          draggingNodeId === dev.id ? 'scale-110 ring-1 ring-blue-500' : ''
+                        }`}
+                        style={{
+                          boxShadow: draggingNodeId === dev.id ? `0 0 12px ${col.hex}70` : '0 4px 10px rgba(0,0,0,0.5)'
+                        }}
+                      >
+                        {renderIcon()}
+
+                        <button
+                          onClick={() => handleOpenSettings(dev.id)}
+                          className="absolute -top-1.5 -right-1.5 bg-slate-800 w-4.5 h-4.5 rounded-full text-[9px] text-slate-300 hover:text-white border border-slate-705 flex items-center justify-center hover:bg-sky-600 shadow-md transition pointer-events-auto cursor-pointer"
+                        >
+                          <Settings className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+
+                      <div className="bg-slate-950/85 border border-slate-800/80 px-2 py-1 mt-1.5 rounded-md backdrop-blur-sm min-w-[100px] flex flex-col items-center shadow-lg pointer-events-auto text-center">
+                        <span className="font-bold text-slate-202 text-[10px] truncate max-w-[110px]">{dev.name}</span>
+                        {subnetText}
+                        {detailSsidBadge}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* LAYER 5: CLIENT DEVICES (CLIENT PORT-HOLDER) */}
+              <div id="clients-layer" className="absolute inset-0 z-30 pointer-events-none">
+                {clientNodeList.map(cli => {
+                  const connectedAp = cli.connectedTo ? networkNodes[cli.connectedTo] : null;
+
+                  let colMode = 'text-slate-400';
+                  let signalText = 'Mất sóng ✕';
+                  let borderStyle = 'border-slate-500';
+
+                  if (connectedAp && cli.currentRssi > DISCONNECT_RSSI) {
+                    const theme = getThemeColors(connectedAp.colorTheme);
+                    borderStyle = theme.border;
+
+                    if (cli.currentRssi > -62) {
+                      colMode = 'text-emerald-400 font-bold';
+                      signalText = `${cli.currentRssi} dBm (Mạnh)`;
+                    } else if (cli.currentRssi > -73) {
+                      colMode = 'text-amber-400 font-bold';
+                      signalText = `${cli.currentRssi} dBm (Vừa)`;
+                    } else {
+                      colMode = 'text-rose-400 font-bold';
+                      signalText = `${cli.currentRssi} dBm (Yếu)`;
+                    }
+                  }
+
+                  const displayIp = cli.ipMode === 'static' ? cli.ipAddress : getDHCPAddressForClient(cli);
+
+                  return (
+                    <div
+                      key={cli.id}
+                      className="absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center draggable-node pointer-events-auto"
+                      style={{
+                        left: `${cli.x}%`,
+                        top: `${cli.y}%`
+                      }}
+                      onMouseDown={(e) => handleMouseDownNode(e, cli.id)}
+                      onTouchStart={(e) => handleMouseDownNode(e, cli.id)}
+                    >
+                      <div
+                        className={`w-7.5 h-10 bg-slate-900 rounded-md flex items-center justify-center border-2 ${borderStyle} shadow-lg cursor-grab active:cursor-grabbing relative transition-transform ${
+                          draggingNodeId === cli.id ? 'scale-115' : ''
+                        }`}
+                        style={{
+                          boxShadow: connectedAp && cli.currentRssi > DISCONNECT_RSSI ? `0 0 8px ${getThemeColors(connectedAp.colorTheme).hex}40` : ''
+                        }}
+                      >
+                        <Smartphone className="w-5 h-5 text-slate-350" />
+
+                        <button
+                          onClick={() => handleOpenSettings(cli.id)}
+                          className="absolute -top-1.5 -right-1.5 bg-slate-800 border border-slate-700 w-4 h-4 rounded-full text-[8px] text-slate-350 hover:text-white flex items-center justify-center hover:bg-sky-600 shadow transition pointer-events-auto cursor-pointer"
+                        >
+                          <Settings className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+
+                      <div className="bg-slate-950/90 border border-slate-805 px-1.5 py-0.5 mt-1 rounded backdrop-blur-sm min-w-[70px] text-center flex flex-col items-center shadow-md">
+                        <span className="text-[10px] text-slate-300 font-semibold truncate max-w-[85px] leading-tight">
+                          {cli.name}
+                        </span>
+                        <span className={`text-[9.5px] ${colMode} leading-tight mt-0.5`}>{signalText}</span>
+                        <span className="text-[8px] text-slate-500 font-mono tracking-tighter leading-none mt-0.5 truncate w-[75px]" title={displayIp}>
+                          {displayIp}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 4. MODAL DIALOG CẤU HÌNH IP CHUYÊN SÂU */}
+      {selectedNodeId && modalData && (
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-[999] flex justify-center items-center pointer-events-auto animate-fade-in p-4 select-text">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl shadow-2xl w-[440px] max-w-full overflow-hidden flex flex-col max-h-[90vh]">
+            {/* Header Modal */}
+            <div className="px-4 py-3 bg-slate-900 border-b border-slate-800 flex justify-between items-center shrink-0">
+              <h3 className="font-bold text-sm text-sky-400 uppercase tracking-wide flex items-center gap-2">
+                <Settings className="w-4 h-4" /> Cài đặt thiết bị {selectedNodeId.startsWith('CLI_') ? 'Máy trạm' : 'Hạ tầng'}
+              </h3>
+              <button
+                onClick={() => {
+                  setSelectedNodeId(null);
+                  setModalData(null);
+                }}
+                className="text-slate-400 hover:text-white transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Khung nhập liệu Scrollable */}
+            <div className="p-4 flex flex-col gap-3.5 overflow-y-auto custom-scrollbar text-xs">
+              <div>
+                <label className="block text-slate-400 font-bold mb-1 uppercase tracking-wider text-[9px]">Tên Thiết Bị / Client</label>
+                <input
+                  type="text"
+                  value={modalData.name}
+                  onChange={(e) => setModalData({ ...modalData, name: e.target.value })}
+                  className="w-full bg-slate-850 border border-slate-700/80 rounded px-3 py-1.5 text-white outline-none focus:border-sky-500"
+                />
+              </div>
+
+              {/* LẤY IP CHO MÁY TRẠM CLIENT */}
+              {selectedNodeId.startsWith('CLI_') ? (
+                <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
+                  <h4 className="text-indigo-400 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
+                    <Smartphone className="w-3.5 h-3.5" /> Giao thức cấp mạng Laptop/Điện thoại
+                  </h4>
+                  <div className="mb-2">
+                    <label className="block text-slate-400 text-[9px] font-bold mb-1 uppercase">Phương Thức IP</label>
+                    <select
+                      value={modalData.ipMode}
+                      onChange={(e) => setModalData({ ...modalData, ipMode: e.target.value as 'dhcp' | 'static' })}
+                      className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-2 rounded mb-2 outline-none focus:border-sky-500"
+                    >
+                      <option value="dhcp">DHCP (Tự động nhận IP từ Router chính)</option>
+                      <option value="static">IP Tĩnh (Static IP cố định)</option>
+                    </select>
+                  </div>
+                  {modalData.ipMode === 'static' && (
+                    <div>
+                      <label className="block text-slate-400 text-[9px] font-bold mb-1 uppercase">Địa Chỉ IP Tĩnh mong muốn</label>
+                      <input
+                        type="text"
+                        value={modalData.ipAddress}
+                        onChange={(e) => setModalData({ ...modalData, ipAddress: e.target.value })}
+                        placeholder="Ví dụ: 192.168.1.50"
+                        className="w-full bg-slate-850 border border-slate-700 rounded px-3 py-1 text-white outline-none focus:border-sky-500"
+                      />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                /* CẤU HÌNH IP CHUYÊN SÂU CHO ROUTER VÀ SWITCH */
+                <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
+                  <h4 className="text-sky-400 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
+                    <Database className="w-3.5 h-3.5" /> Định nghĩa chức năng Gateway & IP Lan
+                  </h4>
+
+                  <div className="mb-2">
+                    <label className="block text-slate-400 font-bold text-[9px] mb-1 uppercase text-slate-450">Chế Độ Hoạt Động</label>
+                    <select
+                      value={modalData.mode}
+                      onChange={(e) => {
+                        const newMode = e.target.value as 'router' | 'bridge';
+                        setModalData({
+                          ...modalData,
+                          mode: newMode,
+                          isMeshEnabled: newMode === 'bridge' ? modalData.isMeshEnabled : false
+                        });
+                      }}
+                      className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-2 rounded outline-none focus:border-sky-500"
+                    >
+                      <option value="router">Gateway Router (Cấp dải mạng riêng / DHCP Server bật)</option>
+                      <option value="bridge">Switch/AP Bridge (Bám trạm tuyến trên cấp IP)</option>
+                    </select>
+                  </div>
+
+                  {modalData.mode === 'router' ? (
+                    <div className="flex flex-col gap-2 bg-slate-950/40 p-2 rounded border border-slate-800">
+                      <div>
+                        <label className="block text-slate-450 font-bold text-[8.5px] mb-1 uppercase">Mạng ngoài WAN IP</label>
+                        <div className="flex gap-1.5">
+                          <select
+                            value={modalData.wanIpMode}
+                            onChange={(e) => setModalData({ ...modalData, wanIpMode: e.target.value as 'dhcp' | 'static' })}
+                            className="bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-1 rounded text-[10px] w-1/3 outline-none"
+                          >
+                            <option value="dhcp">DHCP WAN</option>
+                            <option value="static">Static WAN</option>
+                          </select>
+                          <input
+                            type="text"
+                            value={modalData.wanIp}
+                            disabled={modalData.wanIpMode === 'dhcp'}
+                            placeholder="Dải IP WAN nhà mạng"
+                            onChange={(e) => setModalData({ ...modalData, wanIp: e.target.value })}
+                            className="bg-slate-850 border border-slate-700 rounded px-2.5 py-1 text-white outline-none w-2/3 text-[11px] disabled:opacity-40 focus:border-sky-405"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-slate-450 font-bold text-[8.5px] mb-1 uppercase">LAN Gateway IP (Subnet cấp mạng)</label>
+                        <input
+                          type="text"
+                          value={modalData.lanIp}
+                          placeholder="Ví dụ: 192.168.1.1"
+                          onChange={(e) => setModalData({ ...modalData, lanIp: e.target.value })}
+                          className="w-full bg-slate-850 border border-slate-700 rounded px-3 py-1 text-white outline-none text-[11px] focus:border-sky-505"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-2 bg-slate-955/40 p-2 rounded border border-slate-800">
+                      <div>
+                        <label className="block text-slate-455 font-bold text-[8.5px] mb-1 uppercase">Lấy IP Nội Bộ AP</label>
+                        <select
+                          value={modalData.bridgeIpMode}
+                          onChange={(e) => setModalData({ ...modalData, bridgeIpMode: e.target.value as 'dhcp' | 'static' })}
+                          className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1 px-2 rounded text-[10px] outline-none"
+                        >
+                          <option value="dhcp">Tự động nhận IP DHCP từ Router chính</option>
+                          <option value="static">IP tĩnh quản trị (Static IP AP)</option>
+                        </select>
+                      </div>
+                      {modalData.bridgeIpMode === 'static' && (
+                        <div>
+                          <label className="block text-slate-450 font-bold text-[8.5px] mb-1 uppercase">Đặt IP Quản Trị AP</label>
+                          <input
+                            type="text"
+                            value={modalData.bridgeIp}
+                            placeholder="Ví dụ: 192.168.1.250"
+                            onChange={(e) => setModalData({ ...modalData, bridgeIp: e.target.value })}
+                            className="w-full bg-slate-850 border border-slate-700 rounded px-3 py-1 text-white outline-none text-[11px] focus:border-sky-500"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* LỰA CHỌN PHÁT WI-FI (MÔ PHỎNG ROUTER CÓ HỖ TRỢ WIFI HAY KHÔNG) */}
+              {!selectedNodeId.startsWith('CLI_') && (
+                <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
+                  <h4 className="text-emerald-400 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
+                    <Wifi className="w-3.5 h-3.5" /> Khả năng hỗ trợ Không Dây (Wireless Radio)
+                  </h4>
+                  <div className="flex justify-between items-center bg-slate-950/40 px-2.5 py-2 rounded border border-slate-800">
+                    <div className="flex flex-col pr-2">
+                      <span className="text-[10px] font-bold text-slate-300 uppercase">Phát sóng Wi-Fi (Wi-Fi Enabled)</span>
+                      <span className="text-[8.5px] text-slate-400 mt-0.5 leading-normal">
+                        Bật để router phát Wi-Fi cho máy trạm roaming. Tắt để chỉ làm thiết bị dây.
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const nextHasWifi = !modalData.hasWifi;
+                        setModalData({
+                          ...modalData,
+                          hasWifi: nextHasWifi,
+                          isMeshEnabled: nextHasWifi ? modalData.isMeshEnabled : false
+                        });
+                      }}
+                      className="w-9 h-5 rounded-full transition-colors relative flex items-center bg-slate-700 cursor-pointer shrink-0"
+                      style={{ backgroundColor: modalData.hasWifi ? '#10b981' : '#475569' }}
+                    >
+                      <span
+                        className="w-3.5 h-3.5 bg-white rounded-full shadow absolute transition-transform"
+                        style={{ transform: modalData.hasWifi ? 'translateX(18px)' : 'translateX(4px)' }}
+                      />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* MESH WI-FI & SSID (CHỈ DÀNH CHO THIẾT BỊ WI-FI ĐÃ BẬT PHÁT SÓNG) */}
+              {!selectedNodeId.startsWith('CLI_') && modalData.hasWifi && (
+                <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
+                  <h4 className="text-purple-400 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
+                    <Wifi className="w-3.5 h-3.5 text-purple-400" /> Cấu hình sóng phát Wi-Fi Mesh
+                  </h4>
+
+                  <div className="flex justify-between items-center mb-3 bg-indigo-950/20 px-2 py-1.5 rounded border border-indigo-900/10">
+                    <label className="text-[10px] font-bold text-indigo-300 uppercase">Khai Thác Wi-Fi Mesh (Seamless)</label>
+                    <button
+                      onClick={() => setModalData({ ...modalData, isMeshEnabled: !modalData.isMeshEnabled })}
+                      className="w-9 h-5 rounded-full transition-colors relative flex items-center bg-slate-700 cursor-pointer"
+                      style={{ backgroundColor: modalData.isMeshEnabled ? '#6366f1' : '#475569' }}
+                    >
+                      <span
+                        className="w-3.5 h-3.5 bg-white rounded-full shadow absolute transition-transform"
+                        style={{ transform: modalData.isMeshEnabled ? 'translateX(18px)' : 'translateX(4px)' }}
+                      />
+                    </button>
+                  </div>
+
+                  {modalData.isMeshEnabled ? (
+                    <div className="flex flex-col gap-2 mt-1 pb-1">
+                      <div>
+                        <label className="block text-slate-450 font-bold text-[8.5px] uppercase mb-1">Vai Trò Sóng Mesh</label>
+                        <select
+                          value={modalData.meshRole}
+                          onChange={(e) => {
+                            const role = e.target.value as 'controller' | 'agent';
+                            setModalData({
+                              ...modalData,
+                              meshRole: role,
+                              ssid: role === 'agent' ? 'KTCN_Wifi_Guest' : modalData.ssid
+                            });
+                          }}
+                          className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-2 rounded outline-none"
+                        >
+                          <option value="controller">Controller (Trạm gốc điều khiển SSID)</option>
+                          <option value="agent">Agent (Nhận đồng bộ sóng không dây/Mesh Agent)</option>
+                        </select>
+                      </div>
+                      {modalData.meshRole === 'agent' ? (
+                        <div className="p-1 px-2 border border-yellow-900/35 bg-yellow-950/10 text-[9px] text-yellow-300 rounded leading-normal flex items-start gap-1">
+                          <Info className="w-3.5 h-3.5 text-yellow-405 shrink-0 mt-0.5" />
+                          <span>Agent tự động kế thừa tên mạng SSID từ Controller và phối hợp đồng bộ để Roaming mượt.</span>
+                        </div>
+                      ) : (
+                        <div>
+                          <label className="block text-slate-450 font-bold text-[8.5px] uppercase mb-1">SSID Mesh Chung</label>
+                          <input
+                            type="text"
+                            value={modalData.ssid}
+                            onChange={(e) => setModalData({ ...modalData, ssid: e.target.value })}
+                            className="w-full bg-slate-850 border border-slate-700 rounded px-2.5 py-1.5 text-white outline-none focus:border-sky-505"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="block text-slate-450 font-bold text-[8.5px] uppercase mb-1">Tên WiFi độc lập (SSID)</label>
+                      <input
+                        type="text"
+                        value={modalData.ssid}
+                        placeholder="Ví dụ: WiFi_Tang_1"
+                        onChange={(e) => setModalData({ ...modalData, ssid: e.target.value })}
+                        className="w-full bg-slate-850 border border-slate-700 rounded px-2.5 py-1.5 text-white outline-none focus:border-sky-505"
+                      />
+                    </div>
+                  )}
+
+                  {/* TX POWER & ANTENNA GAIN */}
+                  <div className="grid grid-cols-2 gap-3 mt-3 border-t border-slate-850 pt-2.5">
+                    <div>
+                      <label className="block text-slate-450 font-bold text-[8.5px] uppercase">Lực phát (Tx Power dBm)</label>
+                      <input
+                        type="number"
+                        min="10"
+                        max="30"
+                        value={modalData.txPower}
+                        onChange={(e) => setModalData({ ...modalData, txPower: parseInt(e.target.value) || 20 })}
+                        className="w-full bg-slate-850 border border-slate-702 rounded px-2 py-1 mt-0.5 text-white text-[11px] outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-455 font-bold text-[8.5px] uppercase">Lực Anten (Gain dBi)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="15"
+                        value={modalData.gain}
+                        onChange={(e) => setModalData({ ...modalData, gain: parseInt(e.target.value) || 4 })}
+                        className="w-full bg-slate-855 border border-slate-702 rounded px-2 py-1 mt-0.5 text-white text-[11px] outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* CẤU HÌNH SWITCH (CHỈ DÀNH CHO SWITCH) */}
+              {!selectedNodeId.startsWith('CLI_') && networkNodes[selectedNodeId]?.type === 'switch' && (
+                <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
+                  <h4 className="text-slate-300 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
+                    <Layers className="w-3.5 h-3.5 text-slate-400" /> Bản năng phần cứng Switch
+                  </h4>
+                  <div className="mb-2">
+                    <label className="block text-slate-450 font-bold text-[8.5px] uppercase mb-1">Số Cổng Cắm (Ports)</label>
+                    <select
+                      value={modalData.ports}
+                      onChange={(e) => setModalData({ ...modalData, ports: parseInt(e.target.value) })}
+                      className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-2 rounded text-[11px]"
+                    >
+                      <option value={4}>4 Ports</option>
+                      <option value={8}>8 Ports (Chuẩn)</option>
+                      <option value={16}>16 Ports</option>
+                      <option value={24}>24 Ports</option>
+                      <option value={48}>48 Ports</option>
+                    </select>
+                  </div>
+                  <div className="flex justify-between items-center bg-slate-950/40 p-2 rounded border border-slate-800 mt-2">
+                    <span className="text-[9.5px] font-bold text-slate-300 uppercase">Tải nguồn Power over Ethernet (PoE)</span>
+                    <button
+                      onClick={() => setModalData({ ...modalData, isPoe: !modalData.isPoe })}
+                      className="w-9 h-5 rounded-full transition-colors relative flex items-center bg-slate-700 cursor-pointer"
+                      style={{ backgroundColor: modalData.isPoe ? '#f59e0b' : '#475569' }}
+                    >
+                      <span
+                        className="w-3.5 h-3.5 bg-white rounded-full shadow absolute transition-transform"
+                        style={{ transform: modalData.isPoe ? 'translateX(18px)' : 'translateX(4px)' }}
+                      />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* THIẾT LẬP KẾT NỐI SÓNG LƯU TRẠM MẠNG (UPLINK LINE / MESH PARENT) */}
+              {!selectedNodeId.startsWith('CLI_') && (
+                <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
+                  <h4 className="text-blue-400 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
+                    <Database className="w-3.5 h-3.5 text-blue-405" /> Đường liên kết (Uplink / Backhaul)
+                  </h4>
+                  <div className="mb-2">
+                    <label className="block text-slate-450 font-bold text-[8.5px] uppercase mb-1">Uplink Nối Lên Thiết Bị</label>
+                    <select
+                      value={modalData.uplinkId}
+                      onChange={(e) => setModalData({ ...modalData, uplinkId: e.target.value, uplinkType: e.target.value === 'none' ? 'wired' : modalData.uplinkType })}
+                      className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-2 rounded text-[11px] outline-none"
+                    >
+                      <option value="none">-- Không liên kết lên dải trung tâm --</option>
+                      {networkNodeList
+                        .filter(n => n.id !== selectedNodeId)
+                        .map(n => (
+                          <option key={n.id} value={n.id}>
+                            Nối lên: {n.name}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  {modalData.uplinkId !== 'none' && (
+                    <div>
+                      <label className="block text-slate-450 font-bold text-[8.5px] uppercase mb-1">Đường trung chuyển dải trung tâm</label>
+                      <select
+                        value={modalData.uplinkType}
+                        onChange={(e) => setModalData({ ...modalData, uplinkType: e.target.value as 'wired' | 'wireless' })}
+                        className="w-full bg-slate-855 border border-slate-700 text-slate-202 py-1.5 px-2 rounded text-[11px] outline-none"
+                      >
+                        <option value="wired">Sợi LAN dây mạng (Gigabit LAN)</option>
+                        <option value="wireless">Mesh không dây Backhaul (Khớp 5GHz)</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* BẮT SÓNG ĐỐI VỚI CLIENT */}
+              {selectedNodeId.startsWith('CLI_') && (
+                <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
+                  <h4 className="text-slate-300 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
+                    <Wifi className="w-3.5 h-3.5 text-slate-400" /> Khóa bám AP Sóng Wi-Fi
+                  </h4>
+                  <label className="block text-slate-450 font-bold text-[8.5px] uppercase mb-1">Trạm phát Wi-Fi liên quan</label>
+                  <select
+                    value={modalData.forceConnect}
+                    onChange={(e) => setModalData({ ...modalData, forceConnect: e.target.value })}
+                    className="w-full bg-slate-800 border border-slate-700 text-slate-200 py-1.5 px-2 rounded text-[11px] outline-none"
+                  >
+                    <option value="auto">Tự động (Auto Roaming mượt bám dải tốt nhất)</option>
+                    {networkNodeList
+                      .filter(n => n.hasWifi)
+                      .map(n => (
+                        <option key={n.id} value={n.id}>
+                          Ép liên kết: {n.name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
+            </div>
+
+            {/* Footer Modal: Hành động */}
+            <div className="px-4 py-3 bg-slate-900 border-t border-slate-800 flex justify-between items-center shrink-0">
+              <button
+                onClick={() => handleDeleteNode(selectedNodeId)}
+                className="px-3 py-1.5 bg-rose-950/60 hover:bg-rose-900 border border-rose-800 text-rose-200 hover:text-white rounded text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Gỡ thiết bị
+              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    setSelectedNodeId(null);
+                    setModalData(null);
+                  }}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 rounded text-xs font-bold transition cursor-pointer"
+                >
+                  Đóng
+                </button>
+                <button
+                  onClick={handleSaveModal}
+                  className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-bold transition shadow-lg flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" /> Lưu cấu hình
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CUSTOM CONFIRMATION MODAL (IFRAME SAFE) */}
+      {confirmAction && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[1000] flex justify-center items-center pointer-events-auto p-4 animate-fade-in select-none">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-5 w-[385px] text-center">
+            <div className="w-12 h-12 bg-rose-500/10 border border-rose-500/20 text-rose-500 rounded-full flex items-center justify-center mx-auto mb-3">
+              <AlertTriangle className="w-6 h-6 animate-pulse" />
+            </div>
+            <h3 className="text-white font-bold text-sm uppercase tracking-wide mb-2">
+              {confirmAction.title || 'Xác nhận'}
+            </h3>
+            <p className="text-slate-300 text-xs mb-5 leading-relaxed">
+              {confirmAction.message}
+            </p>
+            <div className="flex justify-center gap-3 text-xs font-semibold">
+              <button
+                onClick={() => setConfirmAction(null)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition cursor-pointer border border-slate-700"
+              >
+                Hủy bỏ
+              </button>
+              <button
+                onClick={() => {
+                  confirmAction.onConfirm();
+                  setConfirmAction(null);
+                }}
+                className={`px-4 py-2 rounded text-white transition cursor-pointer ${
+                  confirmAction.btnColor || 'bg-rose-600 hover:bg-rose-500'
+                }`}
+              >
+                {confirmAction.btnText || 'Xác nhận'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

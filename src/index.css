@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Các lớp tùy chỉnh cho bộ mô phỏng Wi-Fi & Roaming */
+body {
+  font-family: var(--font-sans);
+  background-color: #0b0f19;
+  color: #f8fafc;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.3);
+  border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Kiểu bức tường */
+.wall-brick {
+  background-color: #991b1b;
+  background-image: linear-gradient(335deg, rgba(255, 255, 255, 0.15) 1px, transparent 1px),
+                    linear-gradient(155deg, rgba(255, 255, 255, 0.15) 1px, transparent 1px);
+  background-size: 10px 10px;
+}
+
+.wall-concrete {
+  background-color: #334155;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.1) 1px, transparent 1px);
+  background-size: 4px 4px;
+}
+
+.wall-glass {
+  background-color: rgba(56, 189, 248, 0.12);
+  backdrop-filter: blur(2px);
+  border: 1px dashed rgba(56, 189, 248, 0.5);
+}
+
+.wall-preview {
+  opacity: 0.7;
+  border: 2px dashed #f59e0b !important;
+  background-color: rgba(245, 158, 11, 0.2) !important;
+  background-image: none !important;
+}
+
+/* Hoạt ảnh nét đứt chuyển động */
+@keyframes move-dash {
+  to {
+    background-position: -16px 0;
+  }
+}
+
+.wifi-connection-line-active {
+  background: linear-gradient(90deg, currentColor 50%, transparent 50%);
+  background-size: 16px 4px;
+  animation: move-dash 0.8s linear infinite;
+}
+
+@keyframes pulse-subtle {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(1.02);
+  }
+}
+
+.pulse-coverage {
+  animation: pulse-subtle 4s ease-in-out infinite;
+}
+
+/* Khắc phục lỗi chữ trong dropdown option bị tịt màu (trắng trên nền trắng hoặc ngược lại) */
+option {
+  background-color: #0f172a !important;   /* bg-slate-900 */
+  color: #f8fafc !important;              /* text-slate-50 */
+}
+select option {
+  background-color: #0f172a !important;   /* bg-slate-900 */
+  color: #f8fafc !important;              /* text-slate-50 */
+}
+

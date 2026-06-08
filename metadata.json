@@ -1,0 +1,6 @@
+{
+  "name": "Wi-Fi Topology & Roaming Simulator",
+  "description": "Simulate network topologies, IP/DHCP configuration, custom attenuating walls, and client-side Wi-Fi roaming behaviour.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
