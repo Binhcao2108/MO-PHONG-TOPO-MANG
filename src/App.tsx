@@ -1653,6 +1653,19 @@ export default function App() {
                         </g>
                       );
                     } else {
+                      const mx = (parent.x + dev.x) / 2;
+                      const my = (parent.y + dev.y) / 2;
+                      const distMeters = calculateDistanceMeters(dev.x, dev.y, parent.x, parent.y);
+                      const wallAtten = getWallAttenuation(dev.x, dev.y, parent.x, parent.y, customWalls);
+                      const mRssi = Math.max(
+                        MIN_RSSI,
+                        calculateRealRssi(distMeters, parent.specs.txPower, parent.specs.gain) - wallAtten
+                      );
+
+                      let signalCol = '#34d399'; // Xanh lá
+                      if (mRssi < -78) signalCol = '#f43f5e'; // Đỏ yếu
+                      else if (mRssi < -68) signalCol = '#fbbf24'; // Vàng vừa
+
                       return (
                         <g key={`backhaul-${dev.id}`}>
                           <line
@@ -1669,6 +1682,23 @@ export default function App() {
                               filter: 'drop-shadow(0px 0px 4px rgba(16, 185, 129, 0.5))'
                             }}
                           />
+                          {/* Nhãn RSSI sắc nét ở trung điểm liên kết Mesh Wireless */}
+                          <text
+                            x={`${mx}%`}
+                            y={`${my}%`}
+                            textAnchor="middle"
+                            dominantBaseline="central"
+                            fill={signalCol}
+                            fontSize="9px"
+                            fontFamily="monospace"
+                            fontWeight="bold"
+                            paintOrder="stroke"
+                            stroke="#020617"
+                            strokeWidth="3.5"
+                            style={{ userSelect: 'none' }}
+                          >
+                            {mRssi} dBm
+                          </text>
                         </g>
                       );
                     }
@@ -1765,6 +1795,20 @@ export default function App() {
                   let detailSsidBadge = '';
                   if (dev.hasWifi) {
                     if (dev.isMeshEnabled) {
+                      let meshRssiText = '';
+                      if (dev.meshRole === 'agent' && dev.uplinkId !== 'none' && dev.uplinkType === 'wireless') {
+                        const pNode = networkNodes[dev.uplinkId];
+                        if (pNode) {
+                          const distMeters = calculateDistanceMeters(dev.x, dev.y, pNode.x, pNode.y);
+                          const wallAtten = getWallAttenuation(dev.x, dev.y, pNode.x, pNode.y, customWalls);
+                          const mRssi = Math.max(
+                            MIN_RSSI,
+                            calculateRealRssi(distMeters, pNode.specs.txPower, pNode.specs.gain) - wallAtten
+                          );
+                          meshRssiText = ` (${mRssi} dBm)`;
+                        }
+                      }
+
                       detailSsidBadge = (
                         <div className="mt-1 flex flex-col items-center gap-0.5">
                           {dev.meshRole === 'controller' ? (
@@ -1772,8 +1816,8 @@ export default function App() {
                               Mesh CTRL
                             </span>
                           ) : (
-                            <span className="bg-slate-800/80 text-indigo-300 font-bold px-1 py-0.5 rounded text-[8px] border border-indigo-900/60 leading-none">
-                              Mesh AGENT
+                            <span className="bg-slate-800/80 text-emerald-400 font-bold px-1 py-0.5 rounded text-[8px] border border-emerald-900/60 leading-none">
+                              Mesh AGENT{meshRssiText}
                             </span>
                           )}
                           <span className="text-[8px] text-slate-350 max-w-[85px] truncate mt-0.5" title={dev.ssid}>
@@ -1805,13 +1849,18 @@ export default function App() {
                   return (
                     <div
                       key={dev.id}
-                      className="absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center draggable-node pointer-events-auto"
+                      className="absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center draggable-node pointer-events-auto select-none"
+                      title="Nhấn đúp chuột trái để cấu hình"
                       style={{
                         left: `${dev.x}%`,
                         top: `${dev.y}%`
                       }}
                       onMouseDown={(e) => handleMouseDownNode(e, dev.id)}
                       onTouchStart={(e) => handleMouseDownNode(e, dev.id)}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        handleOpenSettings(dev.id);
+                      }}
                     >
                       <div
                         className={`w-11 h-11 bg-slate-900 rounded-xl flex items-center justify-center border-2 ${
@@ -1894,13 +1943,18 @@ export default function App() {
                   return (
                     <div
                       key={cli.id}
-                      className="absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center draggable-node pointer-events-auto"
+                      className="absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center draggable-node pointer-events-auto select-none"
+                      title="Nhấn đúp chuột trái để cấu hình"
                       style={{
                         left: `${cli.x}%`,
                         top: `${cli.y}%`
                       }}
                       onMouseDown={(e) => handleMouseDownNode(e, cli.id)}
                       onTouchStart={(e) => handleMouseDownNode(e, cli.id)}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        handleOpenSettings(cli.id);
+                      }}
                     >
                       <div
                         className={`w-10 h-10 bg-slate-900 rounded-md flex items-center justify-center border-2 ${borderStyle} shadow-lg cursor-grab active:cursor-grabbing relative transition-transform ${
