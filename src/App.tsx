@@ -21,7 +21,8 @@ import {
   Database,
   Router as RouterIcon,
   Tv,
-  Camera
+  Camera,
+  Radio
 } from 'lucide-react';
 
 // --- DATA TYPE DEFINITIONS ---
@@ -72,6 +73,9 @@ export interface ClientNode {
   clientType?: 'phone' | 'fpt_box' | 'fpt_camera';
   connectionType?: 'wifi' | 'wired';
   wiredTo?: string | null;
+  support80211k?: boolean;
+  support80211v?: boolean;
+  support80211r?: boolean;
 }
 
 export interface Wall {
@@ -253,7 +257,10 @@ const defaultClientNodes: Record<string, ClientNode> = {
     currentRssi: -52,
     rssiMap: {},
     ipMode: 'dhcp',
-    ipAddress: '192.168.1.100'
+    ipAddress: '192.168.1.100',
+    support80211k: true,
+    support80211v: true,
+    support80211r: true
   }
 };
 
@@ -278,6 +285,9 @@ export default function App() {
           if (!parsed[k].clientType) parsed[k].clientType = 'phone';
           if (!parsed[k].connectionType) parsed[k].connectionType = 'wifi';
           if (parsed[k].wiredTo === undefined) parsed[k].wiredTo = null;
+          if (parsed[k].support80211k === undefined) parsed[k].support80211k = true;
+          if (parsed[k].support80211v === undefined) parsed[k].support80211v = true;
+          if (parsed[k].support80211r === undefined) parsed[k].support80211r = true;
         });
         return parsed;
       } catch (e) {
@@ -352,6 +362,9 @@ export default function App() {
     clientType?: 'phone' | 'fpt_box' | 'fpt_camera';
     connectionType?: 'wifi' | 'wired';
     wiredTo?: string | null;
+    support80211k?: boolean;
+    support80211v?: boolean;
+    support80211r?: boolean;
   } | null>(null);
 
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -486,14 +499,21 @@ export default function App() {
             // Ép kết nối
             cli.connectedTo = cli.forceConnect;
           } else if (autoRoam && !isHandulating) {
+            const supportK = cli.support80211k !== false;
+            const supportV = cli.support80211v !== false;
+
+            // 802.11v (BSS transition): AP chủ động chuyển vùng sớm hơn (ngưỡng cao nhạy bén hơn)
+            const triggerThreshold = supportV ? -68 : -74;
+            // 802.11k (Neighbor report): Giảm delta cần thiết vì đã có bản đồ AP lân cận xác thực trước
+            const requiredDelta = supportK ? 2 : 5;
+
             const currentRssiToNode = cli.connectedTo && rssiMap[cli.connectedTo] ? rssiMap[cli.connectedTo] : MIN_RSSI;
 
             if (bestDevId && maxRssi > DISCONNECT_RSSI) {
               if (!cli.connectedTo || currentRssiToNode <= DISCONNECT_RSSI) {
                 // Kết nối mới hoàn toàn nếu chưa nối hoặc sóng cũ sụt quá đứt mạng
                 cli.connectedTo = bestDevId;
-              } else if (currentRssiToNode < -70 && bestDevId !== cli.connectedTo && maxRssi > currentRssiToNode + 3) {
-                // Sóng của trạm hiện tại đang dưới -70dBm, trạm mới tốt hơn ít nhất 3dBm
+              } else if (currentRssiToNode < triggerThreshold && bestDevId !== cli.connectedTo && maxRssi > currentRssiToNode + requiredDelta) {
                 const currDev = networkNodes[cli.connectedTo];
                 const bestDev = networkNodes[bestDevId];
                 // Roaming mượt trong cùng một Mesh SSID
@@ -532,15 +552,24 @@ export default function App() {
             const nextDev = networkNodes[cli.connectedTo];
             if (oldDev && nextDev) {
               if (oldDev.isMeshEnabled && nextDev.isMeshEnabled) {
-                addLog(
-                  'Auto Roaming (Mesh)',
-                  `Seamless Roaming: Thiết bị ${cli.name} được điều phối mượt từ ${oldDev.name} sang ${nextDev.name} (RSSI cũ: ${rssiMap[oldDev.id]}dBm -> RSSI mới: ${rssiMap[nextDev.id]}dBm)`,
-                  'success'
-                );
+                const supportR = cli.support80211r !== false;
+                if (supportR) {
+                  addLog(
+                    'Auto Roaming (FT 802.11r)',
+                    `Seamless Fast Roaming: Thiết bị ${cli.name} chuyển vùng mượt bằng công nghệ 802.11r từ ${oldDev.name} sang ${nextDev.name} chỉ mất ~15ms và 0% rớt gói (RSSI: ${rssiMap[oldDev.id]}dBm -> ${rssiMap[nextDev.id]}dBm).`,
+                    'success'
+                  );
+                } else {
+                  addLog(
+                    'Auto Roaming (Mesh)',
+                    `Mesh Roaming: Thiết bị ${cli.name} chuyển vùng truyền thống (WPA Re-auth) từ ${oldDev.name} sang ${nextDev.name} mất ~280ms, có thể rớt nhẹ vài gói tin (RSSI: ${rssiMap[oldDev.id]}dBm -> ${rssiMap[nextDev.id]}dBm).`,
+                    'success'
+                  );
+                }
               } else {
                 addLog(
                   'Đổi WiFi độc lập',
-                  `Thiết bị ${cli.name} đứt mạng tạm thời để kết nối lại vào trạm tốt hơn: ${nextDev.name}`,
+                  `Thiết bị ${cli.name} đứt mạng tạm thời để kết nối lại vào trạm độc lập tốt hơn: ${nextDev.name}`,
                   'info'
                 );
               }
@@ -554,6 +583,9 @@ export default function App() {
           cli.currentRssi !== prevClients[cliId]?.currentRssi ||
           cli.connectionType !== prevClients[cliId]?.connectionType ||
           cli.wiredTo !== prevClients[cliId]?.wiredTo ||
+          cli.support80211k !== prevClients[cliId]?.support80211k ||
+          cli.support80211v !== prevClients[cliId]?.support80211v ||
+          cli.support80211r !== prevClients[cliId]?.support80211r ||
           JSON.stringify(cli.rssiMap) !== JSON.stringify(prevClients[cliId]?.rssiMap)
         ) {
           nextClients[cliId] = cli;
@@ -567,7 +599,7 @@ export default function App() {
 
   // Tạo khóa dependencies theo dõi tọa độ và kết nối của trạm để cập nhật RSSI trực tiếp khi di chuyển
   const clientCoordsKey = (Object.values(clientNodes) as ClientNode[])
-    .map(c => `${c.id}:${c.x},${c.y}:${c.connectionType}:${c.wiredTo}`)
+    .map(c => `${c.id}:${c.x},${c.y}:${c.connectionType}:${c.wiredTo}:${c.support80211k}:${c.support80211v}:${c.support80211r}`)
     .join(';');
 
   // Chạy cập nhật sóng thời gian thực
@@ -698,7 +730,10 @@ export default function App() {
       currentRssi: MIN_RSSI,
       rssiMap: {},
       ipMode: 'dhcp',
-      ipAddress: '192.168.1.50'
+      ipAddress: '192.168.1.50',
+      support80211k: true,
+      support80211v: true,
+      support80211r: true
     };
 
     setClientNodes(prev => ({ ...prev, [id]: newClient }));
@@ -976,7 +1011,10 @@ export default function App() {
         hasWifi: false,
         clientType: client.clientType || 'phone',
         connectionType: client.connectionType || 'wifi',
-        wiredTo: client.wiredTo || 'none'
+        wiredTo: client.wiredTo || 'none',
+        support80211k: client.support80211k === undefined ? true : client.support80211k,
+        support80211v: client.support80211v === undefined ? true : client.support80211v,
+        support80211r: client.support80211r === undefined ? true : client.support80211r
       });
     } else {
       const node = dev as NetworkNode;
@@ -1022,7 +1060,10 @@ export default function App() {
           clientType: modalData.clientType,
           connectionType: modalData.connectionType,
           wiredTo: modalData.wiredTo === 'none' ? null : modalData.wiredTo,
-          connectedTo: modalData.connectionType === 'wired' ? null : (modalData.forceConnect === 'auto' ? prev[selectedNodeId].connectedTo : modalData.forceConnect)
+          connectedTo: modalData.connectionType === 'wired' ? null : (modalData.forceConnect === 'auto' ? prev[selectedNodeId].connectedTo : modalData.forceConnect),
+          support80211k: modalData.support80211k,
+          support80211v: modalData.support80211v,
+          support80211r: modalData.support80211r
         }
       }));
       addLog('Cập nhật Client', `Đã lưu cấu hình IP/Kết nối cho trạm ${modalData.name}`, 'info');
@@ -1518,7 +1559,7 @@ export default function App() {
               <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.015)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.015)_1px,transparent_1px)] bg-[size:25px_25px] opacity-100 pointer-events-none"></div>
 
               {/* LAYER 1: Sóng Phủ Coverage (AP Wi-Fi) */}
-              <div id="coverage-layer" className="absolute inset-0 pointer-events-none opacity-50">
+              <div id="coverage-layer" className="absolute inset-0 pointer-events-none opacity-65">
                 {networkNodeList.map(dev => {
                   if (!dev.hasWifi) return null;
                   const maxLoss = dev.specs.txPower + dev.specs.gain + 85;
@@ -1537,8 +1578,8 @@ export default function App() {
                         top: `${dev.y}%`,
                         width: `${diamPercentage}%`,
                         height: `${diamPercentage}%`,
-                        background: `radial-gradient(circle, ${col.hex}22 0%, ${col.hex}08 55%, transparent 100%)`,
-                        border: `1px dashed ${col.hex}30`
+                        background: `radial-gradient(circle, ${col.hex}2b 0%, ${col.hex}0f 65%, transparent 100%)`,
+                        border: `2px dashed ${col.hex}50`
                       }}
                     />
                   );
@@ -2318,26 +2359,78 @@ export default function App() {
 
               {/* BẮT SÓNG ĐỐI VỚI CLIENT */}
               {selectedNodeId.startsWith('CLI_') && modalData.connectionType !== 'wired' && (
-                <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
-                  <h4 className="text-slate-300 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
-                    <Wifi className="w-3.5 h-3.5 text-slate-400" /> Khóa bám AP Sóng Wi-Fi
-                  </h4>
-                  <label className="block text-slate-450 font-bold text-[8.5px] uppercase mb-1">Trạm phát Wi-Fi liên quan</label>
-                  <select
-                    value={modalData.forceConnect}
-                    onChange={(e) => setModalData({ ...modalData, forceConnect: e.target.value })}
-                    className="w-full bg-slate-805 border border-slate-700 text-slate-202 py-1.5 px-2 rounded text-[11px] outline-none"
-                  >
-                    <option value="auto">Tự động (Auto Roaming mượt bám dải tốt nhất)</option>
-                    {networkNodeList
-                      .filter(n => n.hasWifi)
-                      .map(n => (
-                        <option key={n.id} value={n.id}>
-                          Ép liên kết: {n.name}
-                        </option>
-                      ))}
-                  </select>
-                </div>
+                <>
+                  <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
+                    <h4 className="text-slate-300 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
+                      <Wifi className="w-3.5 h-3.5 text-slate-400" /> Khóa bám AP Sóng Wi-Fi
+                    </h4>
+                    <label className="block text-slate-450 font-bold text-[8.5px] uppercase mb-1">Trạm phát Wi-Fi liên quan</label>
+                    <select
+                      value={modalData.forceConnect}
+                      onChange={(e) => setModalData({ ...modalData, forceConnect: e.target.value })}
+                      className="w-full bg-slate-805 border border-slate-700 text-slate-202 py-1.5 px-2 rounded text-[11px] outline-none"
+                    >
+                      <option value="auto">Tự động (Auto Roaming mượt bám dải tốt nhất)</option>
+                      {networkNodeList
+                        .filter(n => n.hasWifi)
+                        .map(n => (
+                          <option key={n.id} value={n.id}>
+                            Ép liên kết: {n.name}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  {/* CẤU HÌNH CÔNG NGHỆ 802.11k/v/r ĐỐI VỚI CLIENT WIFI */}
+                  <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800 flex flex-col gap-2">
+                    <h4 className="text-amber-400 font-bold text-[10px] uppercase flex items-center gap-1 pb-1 border-b border-slate-800">
+                      <Radio className="w-3.5 h-3.5 text-amber-400" /> Tính năng Roaming 802.11k/v/r
+                    </h4>
+                    <span className="text-[9.5px] text-slate-400 leading-relaxed mb-1 block">
+                      Kích hoạt các thuật toán/tiêu chuẩn giúp tối ưu hóa tiến trình tự động nhảy sóng (steering/roaming).
+                    </span>
+                    <div className="flex flex-col gap-2.5">
+                      <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={modalData.support80211k ?? true}
+                          onChange={(e) => setModalData({ ...modalData, support80211k: e.target.checked })}
+                          className="mt-0.5 rounded border-slate-700 text-amber-500 focus:ring-amber-500 bg-slate-950 w-3.5 h-3.5 cursor-pointer"
+                        />
+                        <div>
+                          <span className="text-[10px] font-bold text-slate-200 block">Tiêu chuẩn 802.11k (Neighbor Report)</span>
+                          <span className="text-[9px] text-slate-450 block leading-tight">Yêu cầu AP lân cận để quét sóng nhanh cực bám, giảm độ trễ tìm điểm phát mượt mà.</span>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={modalData.support80211v ?? true}
+                          onChange={(e) => setModalData({ ...modalData, support80211v: e.target.checked })}
+                          className="mt-0.5 rounded border-slate-700 text-amber-500 focus:ring-amber-500 bg-slate-950 w-3.5 h-3.5 cursor-pointer"
+                        />
+                        <div>
+                          <span className="text-[10px] font-bold text-slate-200 block">Tiêu chuẩn 802.11v (BSS Transition)</span>
+                          <span className="text-[9px] text-slate-450 block leading-tight">Hỗ trợ Steering từ AP chính chủ động kéo/đổi trạm kết nối khi tín hiệu sụt giảm sớm.</span>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={modalData.support80211r ?? true}
+                          onChange={(e) => setModalData({ ...modalData, support80211r: e.target.checked })}
+                          className="mt-0.5 rounded border-slate-700 text-amber-500 focus:ring-amber-500 bg-slate-950 w-3.5 h-3.5 cursor-pointer"
+                        />
+                        <div>
+                          <span className="text-[10px] font-bold text-slate-200 block">Tiêu chuẩn 802.11r (Fast Transition)</span>
+                          <span className="text-[9px] text-slate-450 block leading-tight">Rút ngắn bắt tay xác thực WPA bảo mật để tránh rớt packet mạng (~15ms siêu nhanh).</span>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
+                </>
               )}
             </div>
 
