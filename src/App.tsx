@@ -19,7 +19,9 @@ import {
   ChevronLeft,
   ChevronRight,
   Database,
-  Router as RouterIcon
+  Router as RouterIcon,
+  Tv,
+  Camera
 } from 'lucide-react';
 
 // --- DATA TYPE DEFINITIONS ---
@@ -67,6 +69,9 @@ export interface ClientNode {
   rssiMap: Record<string, number>;
   ipMode: 'dhcp' | 'static';
   ipAddress: string;
+  clientType?: 'phone' | 'fpt_box' | 'fpt_camera';
+  connectionType?: 'wifi' | 'wired';
+  wiredTo?: string | null;
 }
 
 export interface Wall {
@@ -238,6 +243,9 @@ const defaultClientNodes: Record<string, ClientNode> = {
     id: 'CLI_1',
     name: 'Smartphone BinhCK',
     type: 'client',
+    clientType: 'phone',
+    connectionType: 'wifi',
+    wiredTo: null,
     x: 64,
     y: 30,
     connectedTo: 'DEV_3',
@@ -263,7 +271,20 @@ export default function App() {
 
   const [clientNodes, setClientNodes] = useState<Record<string, ClientNode>>(() => {
     const saved = localStorage.getItem('wifi-sim-clients');
-    return saved ? JSON.parse(saved) : defaultClientNodes;
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        Object.keys(parsed).forEach(k => {
+          if (!parsed[k].clientType) parsed[k].clientType = 'phone';
+          if (!parsed[k].connectionType) parsed[k].connectionType = 'wifi';
+          if (parsed[k].wiredTo === undefined) parsed[k].wiredTo = null;
+        });
+        return parsed;
+      } catch (e) {
+        return defaultClientNodes;
+      }
+    }
+    return defaultClientNodes;
   });
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -328,6 +349,9 @@ export default function App() {
     ipMode: 'dhcp' | 'static';
     ipAddress: string;
     hasWifi: boolean;
+    clientType?: 'phone' | 'fpt_box' | 'fpt_camera';
+    connectionType?: 'wifi' | 'wired';
+    wiredTo?: string | null;
   } | null>(null);
 
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -407,10 +431,17 @@ export default function App() {
   }, [getSubnetGatewayForNode]);
 
   const getDHCPAddressForClient = useCallback((client: ClientNode): string => {
-    if (!client.connectedTo) return 'Mất liên kết (No IP)';
-    const subnet = getSubnetGatewayForNode(client.connectedTo);
-    const suffix = (parseInt(client.id.replace(/[^\d]/g, '')) % 100) + 100;
-    return `${subnet}.${suffix}`;
+    if (client.connectionType === 'wired') {
+      if (!client.wiredTo || client.wiredTo === 'none') return 'Mất liên kết (No Cable)';
+      const subnet = getSubnetGatewayForNode(client.wiredTo);
+      const suffix = (parseInt(client.id.replace(/[^\d]/g, '')) % 100) + 100;
+      return `${subnet}.${suffix}`;
+    } else {
+      if (!client.connectedTo) return 'Mất liên kết (No IP)';
+      const subnet = getSubnetGatewayForNode(client.connectedTo);
+      const suffix = (parseInt(client.id.replace(/[^\d]/g, '')) % 100) + 100;
+      return `${subnet}.${suffix}`;
+    }
   }, [getSubnetGatewayForNode]);
 
   // --- PHYSICS ENGINE -- CẬP NHẬT RSSI & ROAMING ---
@@ -447,39 +478,44 @@ export default function App() {
         cli.rssiMap = rssiMap;
         const prevConnectedTo = cli.connectedTo;
 
-        if (cli.forceConnect !== 'auto' && networkNodes[cli.forceConnect]) {
-          // Ép kết nối
-          cli.connectedTo = cli.forceConnect;
-        } else if (autoRoam && !isHandulating) {
-          const currentRssiToNode = cli.connectedTo && rssiMap[cli.connectedTo] ? rssiMap[cli.connectedTo] : MIN_RSSI;
+        if (cli.connectionType === 'wired') {
+          cli.connectedTo = null;
+          cli.currentRssi = 0;
+        } else {
+          if (cli.forceConnect !== 'auto' && networkNodes[cli.forceConnect]) {
+            // Ép kết nối
+            cli.connectedTo = cli.forceConnect;
+          } else if (autoRoam && !isHandulating) {
+            const currentRssiToNode = cli.connectedTo && rssiMap[cli.connectedTo] ? rssiMap[cli.connectedTo] : MIN_RSSI;
 
-          if (bestDevId && maxRssi > DISCONNECT_RSSI) {
-            if (!cli.connectedTo || currentRssiToNode <= DISCONNECT_RSSI) {
-              // Kết nối mới hoàn toàn nếu chưa nối hoặc sóng cũ sụt quá đứt mạng
-              cli.connectedTo = bestDevId;
-            } else if (currentRssiToNode < -70 && bestDevId !== cli.connectedTo && maxRssi > currentRssiToNode + 3) {
-              // Sóng của trạm hiện tại đang dưới -70dBm, trạm mới tốt hơn ít nhất 3dBm
-              const currDev = networkNodes[cli.connectedTo];
-              const bestDev = networkNodes[bestDevId];
-              // Roaming mượt trong cùng một Mesh SSID
-              if (currDev && bestDev && currDev.isMeshEnabled && bestDev.isMeshEnabled) {
+            if (bestDevId && maxRssi > DISCONNECT_RSSI) {
+              if (!cli.connectedTo || currentRssiToNode <= DISCONNECT_RSSI) {
+                // Kết nối mới hoàn toàn nếu chưa nối hoặc sóng cũ sụt quá đứt mạng
                 cli.connectedTo = bestDevId;
+              } else if (currentRssiToNode < -70 && bestDevId !== cli.connectedTo && maxRssi > currentRssiToNode + 3) {
+                // Sóng của trạm hiện tại đang dưới -70dBm, trạm mới tốt hơn ít nhất 3dBm
+                const currDev = networkNodes[cli.connectedTo];
+                const bestDev = networkNodes[bestDevId];
+                // Roaming mượt trong cùng một Mesh SSID
+                if (currDev && bestDev && currDev.isMeshEnabled && bestDev.isMeshEnabled) {
+                  cli.connectedTo = bestDevId;
+                }
               }
+            } else {
+              cli.connectedTo = null;
             }
           } else {
-            cli.connectedTo = null;
+            // Không auto roaming, kiểm tra xem trạm cũ có hoạt động
+            if (cli.connectedTo && (!rssiMap[cli.connectedTo] || rssiMap[cli.connectedTo] <= DISCONNECT_RSSI)) {
+              cli.connectedTo = null;
+            }
           }
-        } else {
-          // Không auto roaming, kiểm tra xem trạm cũ có hoạt động
-          if (cli.connectedTo && (!rssiMap[cli.connectedTo] || rssiMap[cli.connectedTo] <= DISCONNECT_RSSI)) {
-            cli.connectedTo = null;
-          }
+
+          cli.currentRssi = cli.connectedTo && rssiMap[cli.connectedTo] ? rssiMap[cli.connectedTo] : MIN_RSSI;
         }
 
-        cli.currentRssi = cli.connectedTo && rssiMap[cli.connectedTo] ? rssiMap[cli.connectedTo] : MIN_RSSI;
-
         // Nhật ký thông tin roaming tự động
-        if (cli.connectedTo !== prevConnectedTo && autoRoam && !isHandulating) {
+        if (cli.connectionType !== 'wired' && cli.connectedTo !== prevConnectedTo && autoRoam && !isHandulating) {
           if (!cli.connectedTo) {
             addLog(
               'Mất sóng',
@@ -516,6 +552,8 @@ export default function App() {
         if (
           cli.connectedTo !== prevConnectedTo ||
           cli.currentRssi !== prevClients[cliId]?.currentRssi ||
+          cli.connectionType !== prevClients[cliId]?.connectionType ||
+          cli.wiredTo !== prevClients[cliId]?.wiredTo ||
           JSON.stringify(cli.rssiMap) !== JSON.stringify(prevClients[cliId]?.rssiMap)
         ) {
           nextClients[cliId] = cli;
@@ -527,10 +565,15 @@ export default function App() {
     });
   }, [networkNodes, customWalls, autoRoam, isHandulating, addLog]);
 
+  // Tạo khóa dependencies theo dõi tọa độ và kết nối của trạm để cập nhật RSSI trực tiếp khi di chuyển
+  const clientCoordsKey = (Object.values(clientNodes) as ClientNode[])
+    .map(c => `${c.id}:${c.x},${c.y}:${c.connectionType}:${c.wiredTo}`)
+    .join(';');
+
   // Chạy cập nhật sóng thời gian thực
   useEffect(() => {
     updateNetworkState();
-  }, [networkNodes, customWalls, autoRoam, updateNetworkState]);
+  }, [networkNodes, customWalls, autoRoam, updateNetworkState, clientCoordsKey]);
 
   // --- THÊM / XÓA THIẾT BỊ ---
   const handleAddDevice = (type: DeviceType) => {
@@ -629,12 +672,25 @@ export default function App() {
     addLog('Địa bàn mạng', `Đã lắp thêm thiết bị ${name} thành công.`, 'info');
   };
 
-  const handleAddClient = () => {
+  const handleAddClient = (clientType: 'phone' | 'fpt_box' | 'fpt_camera' = 'phone') => {
     const id = 'CLI_' + Date.now();
+    let name = '';
+    
+    if (clientType === 'phone') {
+      name = 'Smartphone Cá nhân ' + (Object.keys(clientNodes).length + 1);
+    } else if (clientType === 'fpt_box') {
+      name = 'FPT Play Box (TV) ' + (Object.keys(clientNodes).length + 1);
+    } else if (clientType === 'fpt_camera') {
+      name = 'FPT Camera IQ ' + (Object.keys(clientNodes).length + 1);
+    }
+
     const newClient: ClientNode = {
       id,
-      name: 'Client ' + (Object.keys(clientNodes).length + 1),
+      name,
       type: 'client',
+      clientType,
+      connectionType: 'wifi',
+      wiredTo: null,
       x: 40 + Math.random() * 15,
       y: 40 + Math.random() * 15,
       connectedTo: null,
@@ -646,7 +702,7 @@ export default function App() {
     };
 
     setClientNodes(prev => ({ ...prev, [id]: newClient }));
-    addLog('Gia nhập Client', `Thiết bị máy trạm ${newClient.name} đã sẵn sàng bắt sóng.`, 'info');
+    addLog('Gia nhập Client', `Thiết bị máy trạm ${name} đã sẵn sàng kết nối.`, 'info');
   };
 
   // --- XOÁ TOÀN BỘ TOPOLOGY ---
@@ -917,7 +973,10 @@ export default function App() {
         forceConnect: client.forceConnect,
         ipMode: client.ipMode,
         ipAddress: client.ipAddress,
-        hasWifi: false
+        hasWifi: false,
+        clientType: client.clientType || 'phone',
+        connectionType: client.connectionType || 'wifi',
+        wiredTo: client.wiredTo || 'none'
       });
     } else {
       const node = dev as NetworkNode;
@@ -960,7 +1019,10 @@ export default function App() {
           forceConnect: modalData.forceConnect,
           ipMode: modalData.ipMode,
           ipAddress: modalData.ipAddress,
-          connectedTo: modalData.forceConnect === 'auto' ? prev[selectedNodeId].connectedTo : modalData.forceConnect
+          clientType: modalData.clientType,
+          connectionType: modalData.connectionType,
+          wiredTo: modalData.wiredTo === 'none' ? null : modalData.wiredTo,
+          connectedTo: modalData.connectionType === 'wired' ? null : (modalData.forceConnect === 'auto' ? prev[selectedNodeId].connectedTo : modalData.forceConnect)
         }
       }));
       addLog('Cập nhật Client', `Đã lưu cấu hình IP/Kết nối cho trạm ${modalData.name}`, 'info');
@@ -1141,13 +1203,28 @@ export default function App() {
                   <Wifi className="w-4 h-4 text-purple-400" /> Access Point (Phát Sóng)
                 </button>
 
-                <div className="h-[1px] bg-slate-800 my-1"></div>
-                <button
-                  onClick={handleAddClient}
-                  className="w-full bg-indigo-950/60 hover:bg-indigo-900 text-indigo-300 border border-indigo-850 py-1.5 rounded text-[11px] font-semibold transition flex items-center gap-2 px-2.5 cursor-pointer"
-                >
-                  <Smartphone className="w-4 h-4 text-indigo-400 animate-bounce" /> Thêm Client Máy Trạm
-                </button>
+                <div className="h-[1px] bg-slate-800 my-1.5"></div>
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[9px] uppercase tracking-wider font-bold text-slate-400 px-1">Gia nhập Client đầu cuối</span>
+                  <button
+                    onClick={() => handleAddClient('phone')}
+                    className="w-full bg-indigo-950/40 hover:bg-indigo-950/80 text-indigo-300 border border-indigo-900/60 py-1.5 rounded text-[11px] font-semibold transition flex items-center gap-2 px-2.5 cursor-pointer"
+                  >
+                    <Smartphone className="w-3.5 h-3.5 text-indigo-400" /> Thêm Smartphone Cá Nhân
+                  </button>
+                  <button
+                    onClick={() => handleAddClient('fpt_box')}
+                    className="w-full bg-indigo-950/40 hover:bg-indigo-950/80 text-indigo-300 border border-indigo-900/60 py-1.5 rounded text-[11px] font-semibold transition flex items-center gap-2 px-2.5 cursor-pointer"
+                  >
+                    <Tv className="w-3.5 h-3.5 text-sky-450" /> Thêm FPT Play Box (TV)
+                  </button>
+                  <button
+                    onClick={() => handleAddClient('fpt_camera')}
+                    className="w-full bg-indigo-950/40 hover:bg-indigo-950/80 text-indigo-300 border border-indigo-900/60 py-1.5 rounded text-[11px] font-semibold transition flex items-center gap-2 px-2.5 cursor-pointer"
+                  >
+                    <Camera className="w-3.5 h-3.5 text-emerald-400" /> Thêm FPT Camera IQ
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -1558,6 +1635,7 @@ export default function App() {
 
                   {/* Vẽ đường kết nối Wi-Fi Client đối với trạm đang liên kết */}
                   {clientNodeList.map(cli => {
+                    if (cli.connectionType === 'wired') return null;
                     if (!cli.connectedTo || !networkNodes[cli.connectedTo] || cli.currentRssi <= DISCONNECT_RSSI) return null;
                     const ap = networkNodes[cli.connectedTo] as NetworkNode;
                     const col = getThemeColors(ap.colorTheme);
@@ -1576,6 +1654,28 @@ export default function App() {
                         opacity="0.75"
                         style={{
                           filter: `drop-shadow(0px 0px 3px ${col.hex}60)`
+                        }}
+                      />
+                    );
+                  })}
+
+                  {/* Vẽ đường kết nối Cáp LAN của máy trạm (Wired Client) */}
+                  {clientNodeList.map(cli => {
+                    if (cli.connectionType !== 'wired' || !cli.wiredTo || !networkNodes[cli.wiredTo]) return null;
+                    const dev = networkNodes[cli.wiredTo];
+                    return (
+                      <line
+                        key={`wired-line-${cli.id}`}
+                        x1={`${dev.x}%`}
+                        y1={`${dev.y}%`}
+                        x2={`${cli.x}%`}
+                        y2={`${cli.y}%`}
+                        stroke="#2563eb"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        opacity="0.85"
+                        style={{
+                          filter: 'drop-shadow(0px 0px 3px rgba(37, 99, 235, 0.5))'
                         }}
                       />
                     );
@@ -1711,7 +1811,18 @@ export default function App() {
                   let signalText = 'Mất sóng ✕';
                   let borderStyle = 'border-slate-500';
 
-                  if (connectedAp && cli.currentRssi > DISCONNECT_RSSI) {
+                  if (cli.connectionType === 'wired') {
+                    const wiredParent = cli.wiredTo ? networkNodes[cli.wiredTo] : null;
+                    if (wiredParent) {
+                      borderStyle = 'border-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.3)] bg-blue-950/20';
+                      colMode = 'text-blue-400 font-bold';
+                      signalText = 'LAN: 1 Gbps';
+                    } else {
+                      borderStyle = 'border-rose-850 bg-rose-950/15';
+                      colMode = 'text-rose-400 font-medium';
+                      signalText = 'Cáp lỏng (Chưa cắm)';
+                    }
+                  } else if (connectedAp && cli.currentRssi > DISCONNECT_RSSI) {
                     const theme = getThemeColors(connectedAp.colorTheme);
                     borderStyle = theme.border;
 
@@ -1729,6 +1840,16 @@ export default function App() {
 
                   const displayIp = cli.ipMode === 'static' ? cli.ipAddress : getDHCPAddressForClient(cli);
 
+                  const renderClientIcon = () => {
+                    const type = cli.clientType || 'phone';
+                    if (type === 'fpt_box') {
+                      return <Tv className="w-5 h-5 text-sky-400 animate-pulse" />;
+                    } else if (type === 'fpt_camera') {
+                      return <Camera className="w-5 h-5 text-emerald-400" />;
+                    }
+                    return <Smartphone className="w-5 h-5 text-slate-350" />;
+                  };
+
                   return (
                     <div
                       key={cli.id}
@@ -1741,14 +1862,14 @@ export default function App() {
                       onTouchStart={(e) => handleMouseDownNode(e, cli.id)}
                     >
                       <div
-                        className={`w-7.5 h-10 bg-slate-900 rounded-md flex items-center justify-center border-2 ${borderStyle} shadow-lg cursor-grab active:cursor-grabbing relative transition-transform ${
+                        className={`w-10 h-10 bg-slate-900 rounded-md flex items-center justify-center border-2 ${borderStyle} shadow-lg cursor-grab active:cursor-grabbing relative transition-transform ${
                           draggingNodeId === cli.id ? 'scale-115' : ''
                         }`}
                         style={{
-                          boxShadow: connectedAp && cli.currentRssi > DISCONNECT_RSSI ? `0 0 8px ${getThemeColors(connectedAp.colorTheme).hex}40` : ''
+                          boxShadow: cli.connectionType !== 'wired' && connectedAp && cli.currentRssi > DISCONNECT_RSSI ? `0 0 8px ${getThemeColors(connectedAp.colorTheme).hex}40` : ''
                         }}
                       >
-                        <Smartphone className="w-5 h-5 text-slate-350" />
+                        {renderClientIcon()}
 
                         <button
                           onClick={() => handleOpenSettings(cli.id)}
@@ -1810,33 +1931,91 @@ export default function App() {
 
               {/* LẤY IP CHO MÁY TRẠM CLIENT */}
               {selectedNodeId.startsWith('CLI_') ? (
-                <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
-                  <h4 className="text-indigo-400 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
-                    <Smartphone className="w-3.5 h-3.5" /> Giao thức cấp mạng Laptop/Điện thoại
-                  </h4>
-                  <div className="mb-2">
-                    <label className="block text-slate-400 text-[9px] font-bold mb-1 uppercase">Phương Thức IP</label>
-                    <select
-                      value={modalData.ipMode}
-                      onChange={(e) => setModalData({ ...modalData, ipMode: e.target.value as 'dhcp' | 'static' })}
-                      className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-2 rounded mb-2 outline-none focus:border-sky-500"
-                    >
-                      <option value="dhcp">DHCP (Tự động nhận IP từ Router chính)</option>
-                      <option value="static">IP Tĩnh (Static IP cố định)</option>
-                    </select>
-                  </div>
-                  {modalData.ipMode === 'static' && (
-                    <div>
-                      <label className="block text-slate-400 text-[9px] font-bold mb-1 uppercase">Địa Chỉ IP Tĩnh mong muốn</label>
-                      <input
-                        type="text"
-                        value={modalData.ipAddress}
-                        onChange={(e) => setModalData({ ...modalData, ipAddress: e.target.value })}
-                        placeholder="Ví dụ: 192.168.1.50"
-                        className="w-full bg-slate-850 border border-slate-700 rounded px-3 py-1 text-white outline-none focus:border-sky-500"
-                      />
+                <div className="flex flex-col gap-3 w-full">
+                  {/* CẤU HÌNH LOẠI THIẾT BỊ VÀ THIẾT LẬP KẾT NỐI */}
+                  <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
+                    <h4 className="text-sky-400 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
+                      <Smartphone className="w-3.5 h-3.5 text-sky-400" /> Bản chất phần cứng & Vật lý
+                    </h4>
+                    <div className="mb-2">
+                      <label className="block text-slate-400 text-[9px] font-bold mb-1 uppercase">Loại Thiết Bị</label>
+                      <select
+                        value={modalData.clientType}
+                        onChange={(e) => setModalData({ ...modalData, clientType: e.target.value as any })}
+                        className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-2 rounded mb-2 outline-none focus:border-sky-500"
+                      >
+                        <option value="phone">📱 Smartphone Cá Nhân / Máy tính cầm tay</option>
+                        <option value="fpt_box">📺 FPT Play Box (TV Box giải trí thông minh)</option>
+                        <option value="fpt_camera">📷 FPT Camera IQ (Cam an ninh nhận diện khuôn mặt)</option>
+                      </select>
                     </div>
-                  )}
+
+                    <div className="mb-2">
+                      <label className="block text-slate-400 text-[9px] font-bold mb-1 uppercase">Phương thức truyền dẫn</label>
+                      <select
+                        value={modalData.connectionType}
+                        onChange={(e) => {
+                          const nextConnType = e.target.value as 'wifi' | 'wired';
+                          setModalData({
+                            ...modalData,
+                            connectionType: nextConnType,
+                            forceConnect: nextConnType === 'wired' ? 'auto' : modalData.forceConnect
+                          });
+                        }}
+                        className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-2 rounded outline-none focus:border-sky-500"
+                      >
+                        <option value="wifi">📡 Kết nối mạng không dây Wi-Fi</option>
+                        <option value="wired">🔌 Đi cáp LAN (Cố định, hỗ trợ đi dây mạng)</option>
+                      </select>
+                    </div>
+
+                    {modalData.connectionType === 'wired' && (
+                      <div className="mt-2 bg-slate-950/40 p-2 rounded border border-slate-850">
+                        <label className="block text-blue-400 text-[9px] font-bold mb-1 uppercase">Cắm vào cổng hạ tầng nào?</label>
+                        <select
+                          value={modalData.wiredTo || 'none'}
+                          onChange={(e) => setModalData({ ...modalData, wiredTo: e.target.value })}
+                          className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-2 rounded outline-none focus:border-sky-500"
+                        >
+                          <option value="none">-- Rút phích cáp LAN (Để trần hờ) --</option>
+                          {networkNodeList.map(n => (
+                            <option key={n.id} value={n.id}>
+                              Cổng LAN của: {n.name} ({n.type === 'switch' ? 'Switch' : 'AP/Router'})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
+                    <h4 className="text-indigo-400 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
+                      <Smartphone className="w-3.5 h-3.5 text-indigo-400" /> Giao thức cấp mạng Client (TCP/IP)
+                    </h4>
+                    <div className="mb-2">
+                      <label className="block text-slate-400 text-[9px] font-bold mb-1 uppercase">Phương Thức IP</label>
+                      <select
+                        value={modalData.ipMode}
+                        onChange={(e) => setModalData({ ...modalData, ipMode: e.target.value as 'dhcp' | 'static' })}
+                        className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-2 rounded mb-2 outline-none focus:border-sky-500"
+                      >
+                        <option value="dhcp">DHCP (Nhận IP tự động từ Gateway chính)</option>
+                        <option value="static">IP Tĩnh (Static IP cố định cấu hình tay)</option>
+                      </select>
+                    </div>
+                    {modalData.ipMode === 'static' && (
+                      <div>
+                        <label className="block text-slate-400 text-[9px] font-bold mb-1 uppercase">Địa Chỉ IP Tĩnh mong muốn</label>
+                        <input
+                          type="text"
+                          value={modalData.ipAddress}
+                          onChange={(e) => setModalData({ ...modalData, ipAddress: e.target.value })}
+                          placeholder="Ví dụ: 192.168.1.50"
+                          className="w-full bg-slate-850 border border-slate-700 rounded px-3 py-1 text-white outline-none focus:border-sky-500"
+                        />
+                      </div>
+                    )}
+                  </div>
                 </div>
               ) : (
                 /* CẤU HÌNH IP CHUYÊN SÂU CHO ROUTER VÀ SWITCH */
@@ -2138,7 +2317,7 @@ export default function App() {
               )}
 
               {/* BẮT SÓNG ĐỐI VỚI CLIENT */}
-              {selectedNodeId.startsWith('CLI_') && (
+              {selectedNodeId.startsWith('CLI_') && modalData.connectionType !== 'wired' && (
                 <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-800">
                   <h4 className="text-slate-300 font-bold text-[10px] uppercase mb-2 flex items-center gap-1 pb-1 border-b border-slate-800">
                     <Wifi className="w-3.5 h-3.5 text-slate-400" /> Khóa bám AP Sóng Wi-Fi
@@ -2147,7 +2326,7 @@ export default function App() {
                   <select
                     value={modalData.forceConnect}
                     onChange={(e) => setModalData({ ...modalData, forceConnect: e.target.value })}
-                    className="w-full bg-slate-800 border border-slate-700 text-slate-200 py-1.5 px-2 rounded text-[11px] outline-none"
+                    className="w-full bg-slate-805 border border-slate-700 text-slate-202 py-1.5 px-2 rounded text-[11px] outline-none"
                   >
                     <option value="auto">Tự động (Auto Roaming mượt bám dải tốt nhất)</option>
                     {networkNodeList
