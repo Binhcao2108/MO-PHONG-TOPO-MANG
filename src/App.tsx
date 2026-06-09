@@ -23,8 +23,14 @@ import {
   Tv,
   Camera,
   Radio,
-  Image as ImageIcon
+  Image as ImageIcon,
+  Download,
+  Upload,
+  Save,
+  FolderOpen
 } from 'lucide-react';
+import { exportToPdf } from './utils/pdfExport';
+import { exportToJson, importFromJson } from './utils/fileUtils';
 
 // --- DATA TYPE DEFINITIONS ---
 export interface DeviceSpecs {
@@ -566,6 +572,46 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // --- TẢI THƯ VIỆN/DỮ LIỆU TỰ ĐỘNG TỪ GOOGLE DRIVE KHI RENDER ---
+  useEffect(() => {
+    const fetchDriveData = async () => {
+      try {
+        const proxyUrl = '/api/fetch-drive';
+        
+        const response = await fetch(proxyUrl);
+        if (response.ok) {
+          const data = await response.json();
+          let imported = false;
+
+          if (data.networkNodes) { setNetworkNodes(data.networkNodes); imported = true; }
+          if (data.clientNodes) { setClientNodes(data.clientNodes); imported = true; }
+          if (data.walls) { setCustomWalls(data.walls); imported = true; }
+          if (data.deviceTemplates) { setDeviceTemplates(data.deviceTemplates); imported = true; }
+
+          if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'object' && 'category' in data[0]) {
+            setDeviceTemplates(prev => {
+              const existingIds = new Set(prev.map(t => t.id));
+              const newTemplates = data.filter(t => !existingIds.has(t.id));
+              return [...prev, ...newTemplates];
+            });
+            imported = true;
+          }
+
+          if (imported) {
+            addLog('System', 'Đã tải và cập nhật dữ liệu tự động từ Google Drive', 'success');
+          }
+        }
+      } catch (err) {
+        console.error('Lỗi khi tải dữ liệu từ Google Drive:', err);
+      }
+    };
+
+    // Chỉ thực hiện tải 1 lần lúc startup nếu chưa có template ngoài mặc định, 
+    // hoặc có thể tải nạp đè. Ở đây ta tải luôn.
+    fetchDriveData();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // --- TRUY VẾT IP DHCP GATEWAY ---
   const getSubnetGatewayForNode = useCallback((nodeId: string): string => {
     let visited = new Set<string>();
@@ -764,14 +810,17 @@ export default function App() {
   }, [networkNodes, customWalls, autoRoam, isHandulating, addLog]);
 
   // Tạo khóa dependencies theo dõi tọa độ và kết nối của trạm để cập nhật RSSI trực tiếp khi di chuyển
-  const clientCoordsKey = (Object.values(clientNodes) as ClientNode[])
-    .map(c => `${c.id}:${c.x},${c.y}:${c.connectionType}:${c.wiredTo}:${c.support80211k}:${c.support80211v}:${c.support80211r}`)
-    .join(';');
+  const clientCoordsKey = React.useMemo(() => {
+    return (Object.values(clientNodes) as ClientNode[])
+      .map(c => `${c.id}:${c.x},${c.y}:${c.connectionType}:${c.wiredTo}:${c.support80211k}:${c.support80211v}:${c.support80211r}`)
+      .join(';');
+  }, [clientNodes]);
 
   // Chạy cập nhật sóng thời gian thực
   useEffect(() => {
     updateNetworkState();
-  }, [networkNodes, customWalls, autoRoam, updateNetworkState, clientCoordsKey]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [networkNodes, customWalls, autoRoam, clientCoordsKey]);
 
   // --- THÊM / XÓA THIẾT BỊ ---
   const handleAddDevice = (type: DeviceType) => {
@@ -919,6 +968,54 @@ export default function App() {
         setCustomWalls([]);
         setLogs([]);
         addLog('Đã dọn dẹp', 'Bản đồ đã được dọn sạch về trạng thái rỗng.', 'warning');
+      }
+    });
+  };
+
+  // --- EXPORT & IMPORT ---
+  const handleExportProject = () => {
+    const projectData = {
+      networkNodes,
+      clientNodes,
+      walls: customWalls,
+      deviceTemplates
+    };
+    exportToJson(projectData, 'topology_project');
+    addLog('System', 'Đã xuất dữ liệu dự án thành công', 'success');
+  };
+
+  const handleImportProject = () => {
+    importFromJson((data: any) => {
+      let imported = false;
+      if (data.networkNodes) { setNetworkNodes(data.networkNodes); imported = true; }
+      if (data.clientNodes) { setClientNodes(data.clientNodes); imported = true; }
+      if (data.walls) { setCustomWalls(data.walls); imported = true; }
+      if (data.deviceTemplates) { setDeviceTemplates(data.deviceTemplates); imported = true; }
+      
+      if (imported) {
+        addLog('System', 'Đã nhập dữ liệu dự án thành công', 'success');
+      } else {
+        addLog('System', 'File không chứa dữ liệu dự án hợp lệ', 'error');
+      }
+    });
+  };
+
+  const handleExportIcons = () => {
+    exportToJson(deviceTemplates, 'topology_icons');
+    addLog('System', 'Đã xuất thư viện icon thành công', 'success');
+  };
+
+  const handleImportIcons = () => {
+    importFromJson((data: any) => {
+      if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'object' && 'category' in data[0]) {
+        setDeviceTemplates(prev => {
+          const existingIds = new Set(prev.map(t => t.id));
+          const newTemplates = data.filter(t => !existingIds.has(t.id));
+          return [...prev, ...newTemplates];
+        });
+        addLog('System', `Đã nhập và thêm icon mới vào thư viện`, 'success');
+      } else {
+        addLog('System', 'File icon không hợp lệ', 'error');
       }
     });
   };
@@ -1240,10 +1337,10 @@ export default function App() {
       }));
       addLog('Cập nhật Client', `Đã lưu cấu hình IP/Kết nối cho trạm ${modalData.name}`, 'info');
     } else {
-      setNetworkNodes(prev => ({
-        ...prev,
-        [selectedNodeId]: {
-          ...prev[selectedNodeId],
+      setNetworkNodes(prev => {
+        const next = { ...prev };
+        next[selectedNodeId] = {
+          ...next[selectedNodeId],
           name: modalData.name,
           mode: modalData.mode,
           wanIpMode: modalData.wanIpMode,
@@ -1264,8 +1361,31 @@ export default function App() {
             txPower: modalData.txPower,
             gain: modalData.gain
           }
+        };
+
+        // Đồng bộ SSID xuống các Agent nếu đây là Controller
+        if (modalData.isMeshEnabled && modalData.meshRole === 'controller') {
+          const visited = new Set<string>();
+          const syncSsidToAgents = (parentId: string) => {
+            if (visited.has(parentId)) return;
+            visited.add(parentId);
+            Object.keys(next).forEach((k) => {
+              const childNode = next[k];
+              if (
+                childNode.isMeshEnabled &&
+                childNode.meshRole === 'agent' &&
+                childNode.uplinkId === parentId
+              ) {
+                next[k] = { ...childNode, ssid: modalData.ssid };
+                syncSsidToAgents(k); // Đệ quy cho các trạm Mesh phụ nối tiếp
+              }
+            });
+          };
+          syncSsidToAgents(selectedNodeId);
         }
-      }));
+
+        return next;
+      });
       addLog('Cập nhật Thiết bị', `Đã lưu cấu hình mạng/SSID đầy đủ cho ${modalData.name}`, 'info');
     }
 
@@ -1366,7 +1486,28 @@ export default function App() {
             Mô phỏng mạng Layer 3 - Topology - Định dạng IP DHCP - Chuyển vùng Seamless Roaming (Mesh)
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={handleImportProject}
+            className="px-3 py-1.5 bg-emerald-955/40 text-emerald-300 hover:bg-emerald-900 border border-emerald-800 text-xs rounded transition flex items-center gap-1 font-semibold cursor-pointer"
+            title="Tải lên file dự án (.json)"
+          >
+            <FolderOpen className="w-3.5 h-3.5" /> Mở Dự Án
+          </button>
+          <button
+            onClick={handleExportProject}
+            className="px-3 py-1.5 bg-sky-955/40 text-sky-300 hover:bg-sky-900 border border-sky-800 text-xs rounded transition flex items-center gap-1 font-semibold cursor-pointer"
+            title="Lưu lại cấu hình dự án hiện tại"
+          >
+            <Save className="w-3.5 h-3.5" /> Lưu Dự Án
+          </button>
+          <button
+            onClick={() => exportToPdf('canvas-export-wrapper', 'topology-simulation')}
+            className="px-3 py-1.5 bg-indigo-955/40 text-indigo-300 hover:bg-indigo-900 border border-indigo-800 text-xs rounded transition flex items-center gap-1 font-semibold cursor-pointer"
+            title="Xuất bản vẽ hiện trạng ra file PDF"
+          >
+            <Download className="w-3.5 h-3.5" /> Xuất PDF
+          </button>
           <button
             onClick={handleClearAll}
             className="px-3 py-1.5 bg-rose-955/40 text-rose-300 hover:bg-rose-900 border border-rose-800 text-xs rounded transition flex items-center gap-1 font-semibold cursor-pointer"
@@ -1717,6 +1858,7 @@ export default function App() {
 
             {/* Backdrop Zooming & Panning Wrapper */}
             <div
+              id="canvas-export-wrapper"
               className="absolute inset-0 origin-center transition-transform duration-75"
               style={{
                 transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`
@@ -1821,6 +1963,7 @@ export default function App() {
                             strokeWidth="3.5"
                             strokeLinecap="round"
                             opacity="0.8"
+                            className="wired-connection-line-active"
                             style={{ filter: 'drop-shadow(0px 0px 3px rgba(59, 130, 246, 0.4))' }}
                           />
                         </g>
@@ -1850,6 +1993,7 @@ export default function App() {
                             strokeWidth="2.5"
                             strokeDasharray="6,6"
                             strokeLinecap="round"
+                            className="wifi-connection-line-active"
                             opacity="0.9"
                             style={{
                               filter: 'drop-shadow(0px 0px 4px rgba(16, 185, 129, 0.5))'
@@ -1895,6 +2039,7 @@ export default function App() {
                         strokeWidth="2"
                         strokeDasharray="4,6"
                         strokeLinecap="round"
+                        className="wifi-connection-line-active"
                         opacity="0.75"
                         style={{
                           filter: `drop-shadow(0px 0px 3px ${col.hex}60)`
@@ -1917,6 +2062,7 @@ export default function App() {
                         stroke="#2563eb"
                         strokeWidth="2.5"
                         strokeLinecap="round"
+                        className="wired-connection-line-active"
                         opacity="0.85"
                         style={{
                           filter: 'drop-shadow(0px 0px 3px rgba(37, 99, 235, 0.5))'
@@ -2227,17 +2373,35 @@ export default function App() {
               <div className="bg-slate-900/60 border border-slate-800 p-3 rounded-lg flex flex-col gap-2.5">
                 <div className="flex justify-between items-center pb-1.5 border-b border-slate-850">
                   <h4 className="text-amber-500 font-bold text-[10px] uppercase flex items-center gap-1.5">
-                    <ImageIcon className="w-3.5 h-3.5 text-amber-500" /> Thư viện thiết bị đã lưu
+                    <ImageIcon className="w-3.5 h-3.5 text-amber-500" /> Thư viện thiết bị
                   </h4>
-                  {modalData.customImage && (
+                  <div className="flex gap-1">
                     <button
                       type="button"
-                      onClick={() => setModalData({ ...modalData, customImage: '' })}
-                      className="text-[9px] bg-slate-800 hover:bg-rose-950 hover:text-rose-450 border border-slate-700 px-1.5 py-0.5 rounded transition cursor-pointer text-slate-400 animate-fade-in"
+                      onClick={handleImportIcons}
+                      className="text-[9px] bg-slate-800 hover:bg-emerald-900 border border-slate-700 px-1.5 py-0.5 rounded transition cursor-pointer text-slate-300 flex items-center gap-1"
+                      title="Nhập thư viện icon"
                     >
-                      Xóa ảnh (Mặc định)
+                      <FolderOpen className="w-3 h-3" /> Nhập
                     </button>
-                  )}
+                    <button
+                      type="button"
+                      onClick={handleExportIcons}
+                      className="text-[9px] bg-slate-800 hover:bg-sky-900 border border-slate-700 px-1.5 py-0.5 rounded transition cursor-pointer text-slate-300 flex items-center gap-1"
+                      title="Xuất thư viện icon"
+                    >
+                      <Save className="w-3 h-3" /> Xuất
+                    </button>
+                    {modalData.customImage && (
+                      <button
+                        type="button"
+                        onClick={() => setModalData({ ...modalData, customImage: '' })}
+                        className="text-[9px] bg-slate-800 hover:bg-rose-950 hover:text-rose-450 border border-slate-700 px-1.5 py-0.5 rounded transition cursor-pointer text-slate-400 animate-fade-in"
+                      >
+                        Xóa
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {/* Preview hình ảnh thiết bị đang được chọn */}
@@ -2706,10 +2870,17 @@ export default function App() {
                           value={modalData.meshRole}
                           onChange={(e) => {
                             const role = e.target.value as 'controller' | 'agent';
+                            let newSsid = modalData.ssid;
+                            if (role === 'agent' && modalData.uplinkId !== 'none') {
+                              const upNode = networkNodeList.find(n => n.id === modalData.uplinkId);
+                              if (upNode && upNode.ssid) {
+                                newSsid = upNode.ssid;
+                              }
+                            }
                             setModalData({
                               ...modalData,
                               meshRole: role,
-                              ssid: role === 'agent' ? 'KTCN_Wifi_Guest' : modalData.ssid,
+                              ssid: newSsid,
                               uplinkType: role === 'controller' ? 'wired' : modalData.uplinkType
                             });
                           }}
@@ -2823,7 +2994,16 @@ export default function App() {
                     <label className="block text-slate-450 font-bold text-[8.5px] uppercase mb-1">Uplink Nối Lên Thiết Bị</label>
                     <select
                       value={modalData.uplinkId}
-                      onChange={(e) => setModalData({ ...modalData, uplinkId: e.target.value, uplinkType: e.target.value === 'none' ? 'wired' : modalData.uplinkType })}
+                      onChange={(e) => {
+                        const upId = e.target.value;
+                        const upNode = networkNodeList.find(n => n.id === upId);
+                        const isAgent = modalData.meshRole === 'agent';
+                        let newSsid = modalData.ssid;
+                        if (isAgent && upNode && upNode.ssid) {
+                          newSsid = upNode.ssid;
+                        }
+                        setModalData({ ...modalData, uplinkId: upId, uplinkType: upId === 'none' ? 'wired' : modalData.uplinkType, ssid: newSsid });
+                      }}
                       className="w-full bg-slate-850 border border-slate-700 text-slate-200 py-1.5 px-2 rounded text-[11px] outline-none"
                     >
                       <option value="none">-- Không liên kết lên dải trung tâm --</option>
