@@ -64,6 +64,7 @@ export interface NetworkNode {
   bridgeIpMode: 'dhcp' | 'static';
   bridgeIp: string;
   customImage?: string;
+  hideLabel?: boolean;
 }
 
 export interface ClientNode {
@@ -85,6 +86,7 @@ export interface ClientNode {
   support80211v?: boolean;
   support80211r?: boolean;
   customImage?: string;
+  hideLabel?: boolean;
 }
 
 export interface Wall {
@@ -105,7 +107,7 @@ export interface AppLog {
 }
 
 // --- CONSTANTS ---
-const CANVAS_WIDTH_METERS = 200;
+const CANVAS_ASPECT_RATIO = 16 / 9;
 const MIN_RSSI = -95;
 const DISCONNECT_RSSI = -85; // Ngưỡng đứt kết nối hoàn toàn
 const wallPenalties = { brick: 8, concrete: 15, glass: 2 };
@@ -137,17 +139,18 @@ function getWallAttenuation(x1: number, y1: number, x2: number, y2: number, wall
 }
 
 // Tính khoảng cách thực tế dựa trên % tọa độ canvas (mô phỏng)
-function calculateDistanceMeters(x1: number, y1: number, x2: number, y2: number): number {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const pctDistance = Math.sqrt(dx * dx + dy * dy);
-  return (pctDistance / 100) * CANVAS_WIDTH_METERS;
+function calculateDistanceMeters(x1: number, y1: number, x2: number, y2: number, canvasWidthMeters: number): number {
+  const canvasHeightMeters = canvasWidthMeters / CANVAS_ASPECT_RATIO;
+  const dx_m = ((x2 - x1) / 100) * canvasWidthMeters;
+  const dy_m = ((y2 - y1) / 100) * canvasHeightMeters;
+  return Math.sqrt(dx_m * dx_m + dy_m * dy_m);
 }
 
-// Đo mồi công suất phát (FSPL)
+// Đo mồi công suất phát (FSPL) - Đã căn chỉnh suy hao môi trường thực tế ~35dB/decade
 function calculateRealRssi(distanceMeters: number, txPower: number, txGain: number): number {
   const d = distanceMeters < 0.1 ? 0.1 : distanceMeters;
-  const fspl = 46 + 30 * Math.log10(d);
+  // Based on user feedback: 20-22m distance -> -58 to -60 dBm
+  const fspl = 38 + 35 * Math.log10(d);
   return Math.floor(txPower + txGain - fspl);
 }
 
@@ -482,10 +485,21 @@ export default function App() {
   const [isCanvasPanning, setIsCanvasPanning] = useState(false);
   const panStartRef = useRef({ x: 0, y: 0 });
 
+  // Scale and sizing State
+  const [canvasScale, setCanvasScale] = useState<number>(60);
+  const canvasHeightMeters = canvasScale / CANVAS_ASPECT_RATIO;
+  
+  // Tùy chỉnh kích thước
+  const [iconScale, setIconScale] = useState<number>(40);
+  const [wallThicknessScale, setWallThicknessScale] = useState<number>(0.25);
+
   // Vẽ Tường State
   const [editorLayout, setEditorLayout] = useState<'none' | 'custom'>('custom');
   const [selectedTool, setSelectedTool] = useState<'pan' | 'line' | 'rect' | 'eraser'>('pan');
   const [selectedMaterial, setSelectedMaterial] = useState<'brick' | 'concrete' | 'glass'>('brick');
+  const [fixedDimLength, setFixedDimLength] = useState<string>('');
+  const [fixedDimRectW, setFixedDimRectW] = useState<string>('');
+  const [fixedDimRectH, setFixedDimRectH] = useState<string>('');
   const [isDrawingStep2, setIsDrawingStep2] = useState(false);
   const [drawStart, setDrawStart] = useState({ x: 0, y: 0 });
   const [previewWall, setPreviewWall] = useState<Omit<Wall, 'groupId'> | null>(null);
@@ -524,6 +538,7 @@ export default function App() {
     support80211v?: boolean;
     support80211r?: boolean;
     customImage?: string;
+    hideLabel?: boolean;
   } | null>(null);
 
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -531,6 +546,32 @@ export default function App() {
   // Ép kiểu danh sách rõ ràng để tránh lỗi TS2339 (unknown type property access)
   const networkNodeList = Object.values(networkNodes) as NetworkNode[];
   const clientNodeList = Object.values(clientNodes) as ClientNode[];
+
+  // --- KEYBOARD SHORTCUTS ---
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (isDrawingStep2) {
+          setIsDrawingStep2(false);
+          setPreviewWall(null);
+        } else if (selectedNodeId) {
+          setSelectedNodeId(null);
+          setModalData(null);
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        if (editorLayout === 'custom') {
+          setCustomWalls(prev => {
+            if (prev.length === 0) return prev;
+            const lastGroupId = prev[prev.length - 1].groupId;
+            return prev.filter(w => w.groupId !== lastGroupId);
+          });
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isDrawingStep2, editorLayout, selectedNodeId]);
 
   // --- LOCAL PERSISTENCE ---
   useEffect(() => {
@@ -677,7 +718,7 @@ export default function App() {
         // Tính RSSI từ client tới các AP/Router Wi-Fi
         currentNetworkNodes.forEach(dev => {
           if (!dev.hasWifi) return;
-          const distMeters = calculateDistanceMeters(cli.x, cli.y, dev.x, dev.y);
+          const distMeters = calculateDistanceMeters(cli.x, cli.y, dev.x, dev.y, canvasScale);
           const wallAtten = getWallAttenuation(cli.x, cli.y, dev.x, dev.y, customWalls);
           const finalRssi = Math.max(
             MIN_RSSI,
@@ -1080,12 +1121,25 @@ export default function App() {
       yPercent = Math.max(0, Math.min(yPercent, 100));
 
       if (selectedTool === 'line') {
-        const thickness = 1.5;
-        const dx = xPercent - drawStart.x;
-        const dy = yPercent - drawStart.y;
+        const thickness = wallThicknessScale;
+        let dx = xPercent - drawStart.x;
+        let dy = yPercent - drawStart.y;
+        
+        let lengthTarget = parseFloat(fixedDimLength);
+        if (!isNaN(lengthTarget) && lengthTarget > 0) {
+           const L_pct = (lengthTarget / canvasScale) * 100;
+           // If mostly horizontal path, snap horizontal. Wait, it's easier to force absolute direction.
+           if (Math.abs(dx) > Math.abs(dy)) {
+             dx = dx > 0 ? L_pct : -L_pct; // force horizontal dimension
+           } else {
+             const L_pct_h = (lengthTarget / canvasHeightMeters) * 100; // use height ratio
+             dy = dy > 0 ? L_pct_h : -L_pct_h; // force vertical dimension
+           }
+        }
+        
         if (Math.abs(dx) > Math.abs(dy)) {
           setPreviewWall({
-            x: Math.min(drawStart.x, xPercent),
+            x: Math.min(drawStart.x, drawStart.x + dx),
             y: drawStart.y - thickness / 2,
             w: Math.abs(dx),
             h: thickness,
@@ -1094,18 +1148,27 @@ export default function App() {
         } else {
           setPreviewWall({
             x: drawStart.x - thickness / 2,
-            y: Math.min(drawStart.y, yPercent),
+            y: Math.min(drawStart.y, drawStart.y + dy),
             w: thickness,
             h: Math.abs(dy),
             type: selectedMaterial
           });
         }
       } else if (selectedTool === 'rect') {
+        let w_pct = Math.abs(xPercent - drawStart.x);
+        let h_pct = Math.abs(yPercent - drawStart.y);
+        
+        let targetW = parseFloat(fixedDimRectW);
+        if (!isNaN(targetW) && targetW > 0) w_pct = (targetW / canvasScale) * 100;
+        
+        let targetH = parseFloat(fixedDimRectH);
+        if (!isNaN(targetH) && targetH > 0) h_pct = (targetH / canvasHeightMeters) * 100;
+
         setPreviewWall({
-          x: Math.min(drawStart.x, xPercent),
-          y: Math.min(drawStart.y, yPercent),
-          w: Math.abs(xPercent - drawStart.x),
-          h: Math.abs(yPercent - drawStart.y),
+          x: Math.min(drawStart.x, xPercent > drawStart.x ? drawStart.x + w_pct : drawStart.x - w_pct),
+          y: Math.min(drawStart.y, yPercent > drawStart.y ? drawStart.y + h_pct : drawStart.y - h_pct),
+          w: w_pct,
+          h: h_pct,
           type: selectedMaterial
         });
       }
@@ -1143,7 +1206,7 @@ export default function App() {
               { ...previewWall, groupId: nextGroupId }
             ]);
           } else if (selectedTool === 'rect') {
-            const thickness = 1.5;
+            const thickness = wallThicknessScale;
             // Tạo 4 cạnh bao của dầm hình vuông
             setCustomWalls(prev => [
               ...prev,
@@ -1281,7 +1344,8 @@ export default function App() {
         support80211k: client.support80211k === undefined ? true : client.support80211k,
         support80211v: client.support80211v === undefined ? true : client.support80211v,
         support80211r: client.support80211r === undefined ? true : client.support80211r,
-        customImage: client.customImage || ''
+        customImage: client.customImage || '',
+        hideLabel: client.hideLabel || false
       });
     } else {
       const node = dev as NetworkNode;
@@ -1306,7 +1370,8 @@ export default function App() {
         ipMode: 'dhcp',
         ipAddress: '',
         hasWifi: node.hasWifi,
-        customImage: node.customImage || ''
+        customImage: node.customImage || '',
+        hideLabel: node.hideLabel || false
       });
     }
   };
@@ -1332,7 +1397,8 @@ export default function App() {
           support80211k: modalData.support80211k,
           support80211v: modalData.support80211v,
           support80211r: modalData.support80211r,
-          customImage: modalData.customImage
+          customImage: modalData.customImage,
+          hideLabel: modalData.hideLabel
         }
       }));
       addLog('Cập nhật Client', `Đã lưu cấu hình IP/Kết nối cho trạm ${modalData.name}`, 'info');
@@ -1357,6 +1423,7 @@ export default function App() {
           isPoe: modalData.isPoe,
           hasWifi: modalData.hasWifi,
           customImage: modalData.customImage,
+          hideLabel: modalData.hideLabel,
           specs: {
             txPower: modalData.txPower,
             gain: modalData.gain
@@ -1676,11 +1743,32 @@ export default function App() {
                         </button>
                       </div>
 
+                       {/* Tùy chỉnh hiển thị  */}
+                       <div className="mt-2 border-t border-slate-700/50 pt-2">
+                         <label className="text-[9px] font-bold text-slate-500 uppercase flex justify-between">
+                           <span>Kích thước bản đồ</span>
+                           <span className="text-sky-400">{canvasScale}m</span>
+                         </label>
+                         <input type="range" min="10" max="300" value={canvasScale} onChange={(e) => setCanvasScale(Number(e.target.value))} className="w-full accent-sky-500 h-1.5 mt-1 cursor-ew-resize" />
+                         
+                         <label className="text-[9px] font-bold text-slate-500 uppercase flex justify-between mt-2">
+                           <span>Thu phóng biểu tượng</span>
+                           <span className="text-emerald-400">{iconScale}px</span>
+                         </label>
+                         <input type="range" min="16" max="100" value={iconScale} onChange={(e) => setIconScale(Number(e.target.value))} className="w-full accent-emerald-500 h-1.5 mt-1 cursor-ew-resize" />
+
+                         <label className="text-[9px] font-bold text-slate-500 uppercase flex justify-between mt-2">
+                           <span>Độ dày nét tường (%)</span>
+                           <span className="text-purple-400">{wallThicknessScale}%</span>
+                         </label>
+                         <input type="range" min="0.1" max="5" step="0.1" value={wallThicknessScale} onChange={(e) => setWallThicknessScale(Number(e.target.value))} className="w-full accent-purple-500 h-1.5 mt-1 cursor-ew-resize" />
+                       </div>
+
                       {/* Vật liệu tường chặn sóng */}
                       {(selectedTool === 'line' || selectedTool === 'rect') && (
                         <>
-                          <label className="text-[9px] font-bold text-slate-500 uppercase mt-0.5">Chọn Vật Liệu Chặn Sóng</label>
-                          <div className="flex flex-col gap-1">
+                          <label className="text-[9px] font-bold text-slate-500 uppercase mt-2">Chọn Vật Liệu Chặn Sóng</label>
+                          <div className="flex flex-col gap-1 mt-1">
                             <button
                               onClick={() => setSelectedMaterial('brick')}
                               className={`px-2 py-1 rounded text-[10px] border flex justify-between items-center transition cursor-pointer ${
@@ -1709,6 +1797,47 @@ export default function App() {
                               <span>-2 dBm</span>
                             </button>
                           </div>
+
+                          {/* Khung kích thước cố định */}
+                          <div className="mt-2 border-t border-slate-700/50 pt-2">
+                             <label className="text-[9px] font-bold text-slate-500 uppercase">Kích thước tĩnh</label>
+                             {selectedTool === 'line' ? (
+                               <div className="flex bg-slate-900 border border-slate-700 rounded overflow-hidden mt-1 px-2 py-1 items-center">
+                                 <input 
+                                   type="number" 
+                                   placeholder="Dài (m)" 
+                                   className="bg-transparent text-xs text-white outline-none w-full"
+                                   value={fixedDimLength}
+                                   onChange={(e) => setFixedDimLength(e.target.value)}
+                                 />
+                               </div>
+                             ) : (
+                               <div className="flex gap-1 mt-1">
+                                 <div className="flex bg-slate-900 border border-slate-700 rounded overflow-hidden px-2 py-1 items-center">
+                                   <input 
+                                     type="number" 
+                                     placeholder="Ngang (m)" 
+                                     className="bg-transparent text-xs text-white outline-none w-full"
+                                     value={fixedDimRectW}
+                                     onChange={(e) => setFixedDimRectW(e.target.value)}
+                                   />
+                                 </div>
+                                 <div className="flex bg-slate-900 border border-slate-700 rounded overflow-hidden px-2 py-1 items-center">
+                                   <input 
+                                     type="number" 
+                                     placeholder="Dọc (m)" 
+                                     className="bg-transparent text-xs text-white outline-none w-full"
+                                     value={fixedDimRectH}
+                                     onChange={(e) => setFixedDimRectH(e.target.value)}
+                                   />
+                                 </div>
+                               </div>
+                             )}
+                             <div className="text-[9px] text-slate-500 mt-1 italic leading-tight">
+                               Nhập số để vẽ đường cố định 1 chiều chính xác. Để trống để kéo tự do. <br/>
+                               <b>Phím Tắt: </b> Nhấn <b>ESC</b> để phím hủy, <b>CTRL+Z</b> hoàn tác.
+                             </div>
+                           </div>
                         </>
                       )}
                     </div>
@@ -1824,7 +1953,7 @@ export default function App() {
             id="sim-canvas"
             ref={canvasRef}
             onClick={handleCanvasClick}
-            className={`w-full h-[760px] bg-[#02050e] rounded-xl overflow-hidden border border-slate-850 relative ${
+            className={`w-full aspect-[16/9] mx-auto bg-[#02050e] rounded-xl overflow-hidden border border-slate-850 relative ${
               selectedTool === 'pan' ? 'cursor-grab' : selectedTool === 'eraser' ? 'cursor-alias' : 'cursor-crosshair'
             }`}
           >
@@ -1873,6 +2002,14 @@ export default function App() {
               {/* Grid hình dạng nền mờ ảo */}
               <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.015)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.015)_1px,transparent_1px)] bg-[size:25px_25px] opacity-100 pointer-events-none"></div>
 
+              {/* Kích thước cạnh nhà */}
+              <div className="absolute top-0 right-0 w-full flex items-start justify-center pointer-events-none z-10">
+                <span className="bg-[#02050e] text-slate-400 border border-slate-800 rounded-b font-mono font-bold text-[9px] px-2 py-0.5 shadow-sm">Ngang: {canvasScale.toFixed(1)}m</span>
+              </div>
+              <div className="absolute top-1/2 left-0 flex items-center justify-start pointer-events-none z-10 -translate-y-1/2 -rotate-90 origin-left translate-x-3.5">
+                <span className="bg-[#02050e] text-slate-400 border border-slate-800 rounded-b font-mono font-bold text-[9px] px-2 py-0.5 shadow-sm whitespace-nowrap">Dọc: {canvasHeightMeters.toFixed(1)}m</span>
+              </div>
+
               {/* LAYER 1: Sóng Phủ Coverage (AP Wi-Fi) */}
               <div id="coverage-layer" className="absolute inset-0 pointer-events-none opacity-65">
                 {networkNodeList.map(dev => {
@@ -1882,7 +2019,8 @@ export default function App() {
                   const maxDistMet = Math.pow(10, logDist);
 
                   const col = getThemeColors(dev.colorTheme);
-                  const diamPercentage = (maxDistMet / CANVAS_WIDTH_METERS) * 100 * 2 * 0.7;
+                  const widthPercentage = (maxDistMet / canvasScale) * 100 * 2;
+                  const heightPercentage = (maxDistMet / canvasHeightMeters) * 100 * 2;
 
                   return (
                     <div
@@ -1891,8 +2029,8 @@ export default function App() {
                       style={{
                         left: `${dev.x}%`,
                         top: `${dev.y}%`,
-                        width: `${diamPercentage}%`,
-                        height: `${diamPercentage}%`,
+                        width: `${widthPercentage}%`,
+                        height: `${heightPercentage}%`,
                         background: `radial-gradient(circle, ${col.hex}2b 0%, ${col.hex}0f 65%, transparent 100%)`,
                         border: `2px dashed ${col.hex}50`
                       }}
@@ -1932,14 +2070,21 @@ export default function App() {
                 {/* Khung xem trước khi vẽ tường */}
                 {previewWall && (
                   <div
-                    className="absolute wall-preview pointer-events-none border-2 border-dashed border-amber-500 bg-amber-500/20"
+                    className="absolute wall-preview pointer-events-none border-2 border-dashed border-amber-500 bg-amber-500/20 flex items-center justify-center"
                     style={{
                       left: `${previewWall.x}%`,
                       top: `${previewWall.y}%`,
                       width: `${previewWall.w}%`,
                       height: `${previewWall.h}%`
                     }}
-                  />
+                  >
+                    <div className="absolute -top-6 bg-amber-900/90 text-amber-100 px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap shadow-md">
+                      {selectedTool === 'line' 
+                         ? `${calculateDistanceMeters(0, 0, previewWall.w, previewWall.h, canvasScale).toFixed(1)}m` 
+                         : `${(previewWall.w * canvasScale / 100).toFixed(1)}m x ${(previewWall.h * canvasHeightMeters / 100).toFixed(1)}m`
+                      }
+                    </div>
+                  </div>
                 )}
               </div>
 
@@ -1971,7 +2116,7 @@ export default function App() {
                     } else {
                       const mx = (parent.x + dev.x) / 2;
                       const my = (parent.y + dev.y) / 2;
-                      const distMeters = calculateDistanceMeters(dev.x, dev.y, parent.x, parent.y);
+                      const distMeters = calculateDistanceMeters(dev.x, dev.y, parent.x, parent.y, canvasScale);
                       const wallAtten = getWallAttenuation(dev.x, dev.y, parent.x, parent.y, customWalls);
                       const mRssi = Math.max(
                         MIN_RSSI,
@@ -2081,15 +2226,15 @@ export default function App() {
                   const renderIcon = () => {
                     switch (dev.icon) {
                       case 'Server':
-                        return <Server className={`w-5 h-5 ${col.text}`} />;
+                        return <Server className={`w-[60%] h-[60%] ${col.text}`} />;
                       case 'Layers':
-                        return <Layers className={`w-5 h-5 ${col.text}`} />;
+                        return <Layers className={`w-[60%] h-[60%] ${col.text}`} />;
                       case 'Wifi':
-                        return <Wifi className={`w-5 h-5 ${col.text}`} />;
+                        return <Wifi className={`w-[60%] h-[60%] ${col.text}`} />;
                       case 'RouterIcon':
-                        return <RouterIcon className={`w-5 h-5 ${col.text}`} />;
+                        return <RouterIcon className={`w-[60%] h-[60%] ${col.text}`} />;
                       default:
-                        return <Wifi className={`w-5 h-5 ${col.text}`} />;
+                        return <Wifi className={`w-[60%] h-[60%] ${col.text}`} />;
                     }
                   };
 
@@ -2118,7 +2263,7 @@ export default function App() {
                       if (dev.meshRole === 'agent' && dev.uplinkId !== 'none' && dev.uplinkType === 'wireless') {
                         const pNode = networkNodes[dev.uplinkId];
                         if (pNode) {
-                          const distMeters = calculateDistanceMeters(dev.x, dev.y, pNode.x, pNode.y);
+                          const distMeters = calculateDistanceMeters(dev.x, dev.y, pNode.x, pNode.y, canvasScale);
                           const wallAtten = getWallAttenuation(dev.x, dev.y, pNode.x, pNode.y, customWalls);
                           const mRssi = Math.max(
                             MIN_RSSI,
@@ -2188,12 +2333,14 @@ export default function App() {
                       }}
                     >
                       <div
-                        className={`w-11 h-11 bg-slate-900 rounded-xl flex items-center justify-center border-2 ${
+                        className={`bg-slate-900 rounded-xl flex items-center justify-center border-2 ${
                           col.border
                         } shadow-[0_4px_16px_rgba(0,0,0,0.6)] z-10 relative cursor-grab active:cursor-grabbing transition-transform ${
                           draggingNodeId === dev.id ? 'scale-110 ring-1 ring-blue-500' : ''
                         }`}
                         style={{
+                          width: `${iconScale}px`,
+                          height: `${iconScale}px`,
                           boxShadow: draggingNodeId === dev.id ? `0 0 12px ${col.hex}70` : '0 4px 10px rgba(0,0,0,0.5)'
                         }}
                       >
@@ -2216,11 +2363,13 @@ export default function App() {
                         </button>
                       </div>
 
-                      <div className="bg-slate-950/85 border border-slate-800/80 px-2 py-1 mt-1.5 rounded-md backdrop-blur-sm min-w-[100px] flex flex-col items-center shadow-lg pointer-events-auto text-center">
-                        <span className="font-bold text-slate-202 text-[10px] truncate max-w-[110px]">{dev.name}</span>
-                        {subnetText}
-                        {detailSsidBadge}
-                      </div>
+                      {!dev.hideLabel && (
+                        <div className="bg-slate-950/85 border border-slate-800/80 px-2 py-1 mt-1.5 rounded-md backdrop-blur-sm min-w-[100px] flex flex-col items-center shadow-lg pointer-events-auto text-center">
+                          <span className="font-bold text-slate-202 text-[10px] truncate max-w-[110px]">{dev.name}</span>
+                          {subnetText}
+                          {detailSsidBadge}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -2270,18 +2419,18 @@ export default function App() {
                         <img
                           src={cli.customImage}
                           alt={cli.name}
-                          className="w-8 h-8 object-contain rounded"
+                          className="w-full h-full object-contain p-1 rounded"
                           referrerPolicy="no-referrer"
                         />
                       );
                     }
                     const type = cli.clientType || 'phone';
                     if (type === 'fpt_box') {
-                      return <Tv className="w-5 h-5 text-sky-400 animate-pulse" />;
+                      return <Tv className="w-[60%] h-[60%] text-sky-400 animate-pulse" />;
                     } else if (type === 'fpt_camera') {
-                      return <Camera className="w-5 h-5 text-emerald-400" />;
+                      return <Camera className="w-[60%] h-[60%] text-emerald-400" />;
                     }
-                    return <Smartphone className="w-5 h-5 text-slate-350" />;
+                    return <Smartphone className="w-[60%] h-[60%] text-slate-350" />;
                   };
 
                   return (
@@ -2301,10 +2450,12 @@ export default function App() {
                       }}
                     >
                       <div
-                        className={`w-10 h-10 bg-slate-900 rounded-md flex items-center justify-center border-2 ${borderStyle} shadow-lg cursor-grab active:cursor-grabbing relative transition-transform ${
+                        className={`bg-slate-900 rounded-md flex items-center justify-center border-2 ${borderStyle} shadow-lg cursor-grab active:cursor-grabbing relative transition-transform ${
                           draggingNodeId === cli.id ? 'scale-115' : ''
                         }`}
                         style={{
+                          width: `${iconScale}px`,
+                          height: `${iconScale}px`,
                           boxShadow: cli.connectionType !== 'wired' && connectedAp && cli.currentRssi > DISCONNECT_RSSI ? `0 0 8px ${getThemeColors(connectedAp.colorTheme).hex}40` : ''
                         }}
                       >
@@ -2318,15 +2469,17 @@ export default function App() {
                         </button>
                       </div>
 
-                      <div className="bg-slate-950/90 border border-slate-805 px-1.5 py-0.5 mt-1 rounded backdrop-blur-sm min-w-[70px] text-center flex flex-col items-center shadow-md">
-                        <span className="text-[10px] text-slate-300 font-semibold truncate max-w-[85px] leading-tight">
-                          {cli.name}
-                        </span>
-                        <span className={`text-[9.5px] ${colMode} leading-tight mt-0.5`}>{signalText}</span>
-                        <span className="text-[8px] text-slate-500 font-mono tracking-tighter leading-none mt-0.5 truncate w-[75px]" title={displayIp}>
-                          {displayIp}
-                        </span>
-                      </div>
+                      {!cli.hideLabel && (
+                        <div className="bg-slate-950/90 border border-slate-805 px-1.5 py-0.5 mt-1 rounded backdrop-blur-sm min-w-[70px] text-center flex flex-col items-center shadow-md">
+                          <span className="text-[10px] text-slate-300 font-semibold truncate max-w-[85px] leading-tight">
+                            {cli.name}
+                          </span>
+                          <span className={`text-[9.5px] ${colMode} leading-tight mt-0.5`}>{signalText}</span>
+                          <span className="text-[8px] text-slate-500 font-mono tracking-tighter leading-none mt-0.5 truncate w-[75px]" title={displayIp}>
+                            {displayIp}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -2365,8 +2518,17 @@ export default function App() {
                   type="text"
                   value={modalData.name}
                   onChange={(e) => setModalData({ ...modalData, name: e.target.value })}
-                  className="w-full bg-slate-850 border border-slate-700/80 rounded px-3 py-1.5 text-white outline-none focus:border-sky-500 font-medium"
+                  className="w-full bg-slate-850 border border-slate-700/80 rounded px-3 py-1.5 text-white outline-none focus:border-sky-500 font-medium mb-3"
                 />
+                <label className="flex items-center justify-between bg-slate-900 border border-slate-700/50 rounded px-3 py-2 cursor-pointer shadow-sm hover:border-slate-600 transition">
+                  <span className="text-[10px] font-bold text-slate-300">Chỉ hiển thị Icon (Tắt/Ẩn thẻ thông số trên bản vẽ)</span>
+                  <input
+                    type="checkbox"
+                    checked={!!modalData.hideLabel}
+                    onChange={(e) => setModalData({ ...modalData, hideLabel: e.target.checked })}
+                    className="rounded border-slate-700 text-sky-500 focus:ring-sky-500 bg-slate-950 w-3.5 h-3.5 cursor-pointer"
+                  />
+                </label>
               </div>
 
               {/* THƯ VIỆN THIẾT BỊ TỰ ĐỊNH NGHĨA (ĐÃ LƯU & CÓ THỂ SỬ DỤNG CHO CÁC LẦN TIẾP THEO) */}
