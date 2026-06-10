@@ -1,3 +1,4 @@
+import defaultData from './defaultData.json';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Server,
@@ -178,202 +179,12 @@ function getControllerId(nodeId: string, nodes: Record<string, NetworkNode>): st
 }
 
 // --- SAMPLE INITIAL DATABASE ---
-const defaultNetworkNodes: Record<string, NetworkNode> = {
-  DEV_1: {
-    id: 'DEV_1',
-    type: 'isp_modem',
-    name: 'ISP Modem chính',
-    icon: 'Server',
-    colorTheme: 'sky',
-    x: 18,
-    y: 35,
-    hasWifi: true,
-    specs: { txPower: 18, gain: 3 },
-    mode: 'router',
-    ssid: 'KTCN_NhaMang_5G',
-    ports: 4,
-    isMeshEnabled: false,
-    meshRole: 'agent',
-    uplinkId: 'none',
-    uplinkType: 'wired',
-    isPoe: false,
-    wanIpMode: 'static',
-    wanIp: '14.225.2.11',
-    lanIp: '192.168.1.1',
-    bridgeIpMode: 'dhcp',
-    bridgeIp: ''
-  },
-  DEV_2: {
-    id: 'DEV_2',
-    type: 'switch',
-    name: 'Switch LAN Tầng 1',
-    icon: 'Layers',
-    colorTheme: 'slate',
-    x: 42,
-    y: 35,
-    hasWifi: false,
-    specs: { txPower: 0, gain: 0 },
-    mode: 'bridge',
-    ssid: '',
-    ports: 8,
-    isMeshEnabled: false,
-    meshRole: 'agent',
-    uplinkId: 'DEV_1',
-    uplinkType: 'wired',
-    isPoe: true,
-    wanIpMode: 'dhcp',
-    wanIp: '',
-    lanIp: '',
-    bridgeIpMode: 'dhcp',
-    bridgeIp: ''
-  },
-  DEV_3: {
-    id: 'DEV_3',
-    type: 'ap',
-    name: 'AP Phòng Khách',
-    icon: 'Wifi',
-    colorTheme: 'purple',
-    x: 58,
-    y: 20,
-    hasWifi: true,
-    specs: { txPower: 20, gain: 4 },
-    mode: 'bridge',
-    ssid: 'KTCN_Wifi_Guest',
-    ports: 4,
-    isMeshEnabled: true,
-    meshRole: 'controller',
-    uplinkId: 'DEV_2',
-    uplinkType: 'wired',
-    isPoe: false,
-    wanIpMode: 'dhcp',
-    wanIp: '',
-    lanIp: '',
-    bridgeIpMode: 'dhcp',
-    bridgeIp: ''
-  },
-  DEV_4: {
-    id: 'DEV_4',
-    type: 'ap',
-    name: 'AP Sân Thượng',
-    icon: 'Wifi',
-    colorTheme: 'purple',
-    x: 80,
-    y: 50,
-    hasWifi: true,
-    specs: { txPower: 20, gain: 4 },
-    mode: 'bridge',
-    ssid: 'KTCN_Wifi_Guest',
-    ports: 4,
-    isMeshEnabled: true,
-    meshRole: 'agent',
-    uplinkId: 'DEV_3',
-    uplinkType: 'wireless',
-    isPoe: false,
-    wanIpMode: 'dhcp',
-    wanIp: '',
-    lanIp: '',
-    bridgeIpMode: 'dhcp',
-    bridgeIp: ''
-  }
-};
+const defaultNetworkNodes: Record<string, NetworkNode> = defaultData.networkNodes as any;
 
-const defaultClientNodes: Record<string, ClientNode> = {
-  CLI_1: {
-    id: 'CLI_1',
-    name: 'Smartphone BinhCK',
-    type: 'client',
-    clientType: 'phone',
-    connectionType: 'wifi',
-    wiredTo: null,
-    x: 64,
-    y: 30,
-    connectedTo: 'DEV_3',
-    forceConnect: 'auto',
-    currentRssi: -52,
-    rssiMap: {},
-    ipMode: 'dhcp',
-    ipAddress: '192.168.1.100',
-    support80211k: true,
-    support80211v: true,
-    support80211r: true
-  }
-};
+const defaultClientNodes: Record<string, ClientNode> = defaultData.clientNodes as any;
 
-const defaultWalls: Wall[] = [
-  { x: 69, y: 10, w: 2, h: 48, type: 'brick', groupId: 1 },
-  { x: 30, y: 45, w: 25, h: 2, type: 'concrete', groupId: 2 }
-];
+const defaultWalls: Wall[] = defaultData.walls as any;
 
-const PRESET_DEVICE_IMAGES = {
-  modem: [
-    {
-      id: 'custom_modem_1',
-      name: 'Modem GPON FPT G-97RG6M',
-      svg: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect x="18" y="6" width="28" height="52" rx="4" fill="%230f172a" stroke="%230ea5e9" stroke-width="2.5"/><line x1="18" y1="18" x2="46" y2="18" stroke="%231e293b" stroke-width="2"/><line x1="24" y1="26" x2="40" y2="26" stroke="%23334155" stroke-width="2"/><line x1="24" y1="34" x2="40" y2="34" stroke="%23334155" stroke-width="2"/><line x1="24" y1="42" x2="40" y2="42" stroke="%23334155" stroke-width="2"/><circle cx="26" cy="12" r="2" fill="%2322c55e"/><circle cx="32" cy="12" r="2" fill="%2322c55e"/><circle cx="38" cy="12" r="2" fill="%23ef4444"/><path d="M12 28 l6-4 v8 z" fill="%230ea5e9"/><path d="M52 28 l-6-4 v8 z" fill="%230ea5e9"/></svg>`
-    },
-    {
-      id: 'custom_modem_2',
-      name: 'Gateway EdgeRouter ER-X',
-      svg: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect x="8" y="16" width="48" height="32" rx="5" fill="%231e293b" stroke="%230ea5e9" stroke-width="2.5"/><rect x="14" y="22" width="36" height="20" rx="2" fill="%230f172a"/><circle cx="20" cy="32" r="3" fill="%230ea5e9"/><circle cx="32" cy="32" r="3" fill="%2322c55e"/><circle cx="44" cy="32" r="3" fill="%23eab308"/></svg>`
-    },
-    {
-      id: 'custom_modem_3',
-      name: 'Modem FPT Optical AC1000C',
-      svg: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect x="14" y="10" width="36" height="44" rx="10" fill="%231e293b" stroke="%230284c7" stroke-width="2.5"/><ellipse cx="32" cy="24" r="6" fill="%230ea5e9" opacity="0.6"/><circle cx="32" cy="40" r="3" fill="%2322c55e"/><line x1="24" y1="48" x2="40" y2="48" stroke="%23ffffff" stroke-width="1.5"/></svg>`
-    }
-  ],
-  router: [
-    {
-      id: 'custom_router_1',
-      name: 'Wifi-6 AX1800GZ FPT',
-      svg: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><path d="M6 14 l4-10 h4 M58 14 l-4-10 h-4 M32 8 v14" fill="none" stroke="%2310b981" stroke-width="2"/><rect x="10" y="22" width="44" height="28" rx="4" fill="%230f172a" stroke="%2310b981" stroke-width="2.5"/><circle cx="20" cy="36" r="2.5" fill="%2322c55e"/><circle cx="28" cy="36" r="2.5" fill="%2322c55e"/><circle cx="36" cy="36" r="2.5" fill="%2322c55e"/><circle cx="44" cy="36" r="2.5" fill="%23ef4444"/><path d="M14 44 h36" stroke="%23334155" stroke-width="2"/></svg>`
-    },
-    {
-      id: 'custom_router_2',
-      name: 'Dualband AC1200 Smart',
-      svg: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><path d="M10 10 l10 16 M54 10 l-10 16" stroke="%230284c7" stroke-width="2.5"/><rect x="12" y="26" width="40" height="24" rx="12" fill="%230f172a" stroke="%230ea5e9" stroke-width="2"/><ellipse cx="32" cy="38" r="12" fill="none" stroke="%2334d399" stroke-width="1" stroke-dasharray="2 2"/><circle cx="32" cy="38" r="3" fill="%230ea5e9"/></svg>`
-    },
-    {
-      id: 'custom_router_3',
-      name: 'Enterprise Router AX3000',
-      svg: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><path d="M4 14 v16 M60 14 v16 M32 6 v12" stroke="%23eab308" stroke-width="2"/><rect x="14" y="22" width="36" height="30" rx="3" fill="%231e293b" stroke="%23eab308" stroke-width="2.5"/><circle cx="32" cy="32" r="4" fill="%23eab308"/><line x1="20" y1="42" x2="44" y2="42" stroke="%23334155" stroke-width="2"/></svg>`
-    }
-  ],
-  switch: [
-    {
-      id: 'custom_sw_1',
-      name: 'FPT Switch 8-Port PoE',
-      svg: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect x="6" y="20" width="52" height="24" rx="3" fill="%231e293b" stroke="%2364748b" stroke-width="2"/><rect x="10" y="26" width="6" height="6" fill="%230f172a" stroke="%2364748b"/><rect x="19" y="26" width="6" height="6" fill="%230f172a" stroke="%2364748b"/><rect x="28" y="26" width="6" height="6" fill="%230f172a" stroke="%2364748b"/><rect x="37" y="26" width="6" height="6" fill="%230f172a" stroke="%2364748b"/><rect x="46" y="26" width="6" height="6" fill="%230f172a" stroke="%2364748b"/><circle cx="13" cy="36" r="1.5" fill="%2322c55e"/><circle cx="22" cy="36" r="1.5" fill="%2322c55e"/><circle cx="31" cy="36" r="1.5" fill="%23ef4444"/><circle cx="40" cy="36" r="1.5" fill="%2322c55e"/><circle cx="49" cy="36" r="1.5" fill="%23f59e0b"/></svg>`
-    },
-    {
-      id: 'custom_sw_2',
-      name: 'Core Switch PoE 24-Port',
-      svg: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect x="4" y="22" width="56" height="20" fill="%230f172a" stroke="%2394a3b8" stroke-width="2"/><line x1="10" y1="28" x2="54" y2="28" stroke="%23475569" stroke-dasharray="2 2"/><rect x="10" y="32" width="40" height="4" fill="%231e293b"/><circle cx="12" cy="34" r="1" fill="%2322c55e"/><circle cx="16" cy="34" r="1" fill="%2322c55e"/><circle cx="20" cy="34" r="1" fill="%2322c55e"/><circle cx="24" cy="34" r="1" fill="%2322c55e"/><circle cx="38" cy="34" r="1" fill="%23eab308"/></svg>`
-    },
-    {
-      id: 'custom_sw_3',
-      name: 'Switch Lắp Tủ Rack 16P',
-      svg: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect x="6" y="18" width="52" height="28" rx="4" fill="%230f172a" stroke="%23cbd5e1" stroke-width="2.5"/><polygon points="20,24 28,24 24,32" fill="%2338bdf8"/><polygon points="36,24 44,24 40,32" fill="%2338bdf8"/><circle cx="24" cy="38" r="2.5" fill="%2322c55e"/><circle cx="40" cy="38" r="2.5" fill="%2322c55e"/></svg>`
-    }
-  ],
-  ap: [
-    {
-      id: 'custom_ap_1',
-      name: 'Ceiling Access Point AX3000',
-      svg: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><circle cx="32" cy="32" r="26" fill="%23f8fafc" stroke="%23a855f7" stroke-width="3"/><circle cx="32" cy="32" r="12" fill="none" stroke="%23c084fc" stroke-width="1.5" stroke-dasharray="3 3"/><circle cx="32" cy="32" r="6" fill="%23a855f7"/><circle cx="32" cy="32" r="1.5" fill="%2322d3ee" className="animate-pulse"/></svg>`
-    },
-    {
-      id: 'custom_ap_2',
-      name: 'AP Gắn Tường Wall-Plate Smart',
-      svg: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect x="18" y="10" width="28" height="44" rx="4" fill="%23f1f5f9" stroke="%238b5cf6" stroke-width="2"/><ellipse cx="32" cy="24" r="8" fill="none" stroke="%23c084fc" stroke-dasharray="2 1"/><circle cx="32" cy="24" r="2" fill="%238b5cf6"/><rect x="24" y="38" width="16" height="8" rx="1" fill="%23e2e8f0"/><line x1="28" y1="42" x2="36" y2="42" stroke="%2394a3b8" stroke-width="1.5"/></svg>`
-    },
-    {
-      id: 'custom_ap_3',
-      name: 'AP Ngoài Trời Outdoor HighGain',
-      svg: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect x="22" y="16" width="20" height="36" rx="3" fill="%23ffffff" stroke="%236366f1" stroke-width="2.5"/><path d="M32 16 v-8 M28 8 h8" stroke="%236366f1" stroke-width="2"/><circle cx="32" cy="26" r="3" fill="%236366f1"/><circle cx="32" cy="36" r="2" fill="%2322c55e"/><circle cx="32" cy="44" r="2" fill="%2322c55e"/></svg>`
-    }
-  ]
-};
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -399,38 +210,7 @@ export default function App() {
         // Fallback below
       }
     }
-    return [
-      {
-        id: 'tpl_modem_1',
-        name: 'Modem GPON FPT G-97RG6M',
-        category: 'modem',
-        image: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect x="18" y="6" width="28" height="52" rx="4" fill="%230f172a" stroke="%230ea5e9" stroke-width="2.5"/><line x1="18" y1="18" x2="46" y2="18" stroke="%231e293b" stroke-width="2"/><line x1="24" y1="26" x2="40" y2="26" stroke="%23334155" stroke-width="2"/><line x1="24" y1="34" x2="40" y2="34" stroke="%23334155" stroke-width="2"/><line x1="24" y1="42" x2="40" y2="42" stroke="%23334155" stroke-width="2"/><circle cx="26" cy="12" r="2" fill="%2322c55e"/><circle cx="32" cy="12" r="2" fill="%2322c55e"/><circle cx="38" cy="12" r="2" fill="%23ef4444"/><path d="M12 28 l6-4 v8 z" fill="%230ea5e9"/><path d="M52 28 l-6-4 v8 z" fill="%230ea5e9"/></svg>`
-      },
-      {
-        id: 'tpl_modem_2',
-        name: 'Gateway EdgeRouter ER-X',
-        category: 'modem',
-        image: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect x="8" y="16" width="48" height="32" rx="5" fill="%231e293b" stroke="%230ea5e9" stroke-width="2.5"/><rect x="14" y="22" width="36" height="20" rx="2" fill="%230f172a"/><circle cx="20" cy="32" r="3" fill="%230ea5e9"/><circle cx="32" cy="32" r="3" fill="%2322c55e"/><circle cx="44" cy="32" r="3" fill="%23eab308"/></svg>`
-      },
-      {
-        id: 'tpl_router_1',
-        name: 'Wifi-6 AX1800GZ FPT',
-        category: 'router',
-        image: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><path d="M6 14 l4-10 h4 M58 14 l-4-10 h-4 M32 8 v14" fill="none" stroke="%2310b981" stroke-width="2"/><rect x="10" y="22" width="44" height="28" rx="4" fill="%230f172a" stroke="%2310b981" stroke-width="2.5"/><circle cx="20" cy="36" r="2.5" fill="%2322c55e"/><circle cx="28" cy="36" r="2.5" fill="%2322c55e"/><circle cx="36" cy="36" r="2.5" fill="%2322c55e"/><circle cx="44" cy="36" r="2.5" fill="%23ef4444"/><path d="M14 44 h36" stroke="%23334155" stroke-width="2"/></svg>`
-      },
-      {
-        id: 'tpl_sw_1',
-        name: 'FPT Switch 8-Port PoE',
-        category: 'switch',
-        image: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect x="6" y="20" width="52" height="24" rx="3" fill="%231e293b" stroke="%2364748b" stroke-width="2"/><rect x="10" y="26" width="6" height="6" fill="%230f172a" stroke="%2364748b"/><rect x="19" y="26" width="6" height="6" fill="%230f172a" stroke="%2364748b"/><rect x="28" y="26" width="6" height="6" fill="%230f172a" stroke="%2364748b"/><rect x="37" y="26" width="6" height="6" fill="%230f172a" stroke="%2364748b"/><rect x="46" y="26" width="6" height="6" fill="%230f172a" stroke="%2364748b"/><circle cx="13" cy="36" r="1.5" fill="%2322c55e"/><circle cx="22" cy="36" r="1.5" fill="%2322c55e"/><circle cx="31" cy="36" r="1.5" fill="%23ef4444"/><circle cx="40" cy="36" r="1.5" fill="%2322c55e"/><circle cx="49" cy="36" r="1.5" fill="%23f59e0b"/></svg>`
-      },
-      {
-        id: 'tpl_ap_1',
-        name: 'Ceiling Access Point AX3000',
-        category: 'ap',
-        image: `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><circle cx="32" cy="32" r="26" fill="%23f8fafc" stroke="%23a855f7" stroke-width="3"/><circle cx="32" cy="32" r="12" fill="none" stroke="%23c084fc" stroke-width="1.5" stroke-dasharray="3 3"/><circle cx="32" cy="32" r="6" fill="%23a855f7"/><circle cx="32" cy="32" r="1.5" fill="%2322d3ee" className="animate-pulse"/></svg>`
-      }
-    ];
+    return defaultData.deviceTemplates as any;
   });
 
   // State nhập liệu cho form thêm thiết bị vào thư viện
