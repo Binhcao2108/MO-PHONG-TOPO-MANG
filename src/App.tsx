@@ -27,7 +27,8 @@ import {
   Download,
   Upload,
   Save,
-  FolderOpen
+  FolderOpen,
+  Lock
 } from 'lucide-react';
 import { exportToPdf } from './utils/pdfExport';
 import { exportToJson, importFromJson } from './utils/fileUtils';
@@ -375,6 +376,11 @@ const PRESET_DEVICE_IMAGES = {
 };
 
 export default function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [loginId, setLoginId] = useState("");
+  const [loginPass, setLoginPass] = useState("");
+  const [loginError, setLoginError] = useState(false);
+
   // --- STATE ---
   const [iconTab, setIconTab] = useState<'modem' | 'router' | 'switch' | 'ap'>('modem');
 
@@ -1091,8 +1097,14 @@ export default function App() {
     // XỬ LÝ KÉO THẢ NODE/CLIENT
     if (draggingNodeId && canvasRef.current) {
       const rect = canvasRef.current.getBoundingClientRect();
-      let xPercent = ((clientX - rect.left) / rect.width) * 100;
-      let yPercent = ((clientY - rect.top) / rect.height) * 100;
+      const lx = clientX - rect.left;
+      const ly = clientY - rect.top;
+      const cx = rect.width / 2;
+      const cy = rect.height / 2;
+      const rx = (lx - cx - pan.x) / zoom + cx;
+      const ry = (ly - cy - pan.y) / zoom + cy;
+      let xPercent = (rx / rect.width) * 100;
+      let yPercent = (ry / rect.height) * 100;
 
       xPercent = Math.max(0, Math.min(xPercent, 100));
       yPercent = Math.max(0, Math.min(yPercent, 100));
@@ -1114,8 +1126,14 @@ export default function App() {
     // XỬ LÝ VẼ TƯỜNG TRỰC TIẾP TRÊN MẶT BẰNG
     if (editorLayout === 'custom' && isDrawingStep2 && canvasRef.current) {
       const rect = canvasRef.current.getBoundingClientRect();
-      let xPercent = ((clientX - rect.left) / rect.width) * 100;
-      let yPercent = ((clientY - rect.top) / rect.height) * 100;
+      const lx = clientX - rect.left;
+      const ly = clientY - rect.top;
+      const cx = rect.width / 2;
+      const cy = rect.height / 2;
+      const rx = (lx - cx - pan.x) / zoom + cx;
+      const ry = (ly - cy - pan.y) / zoom + cy;
+      let xPercent = (rx / rect.width) * 100;
+      let yPercent = (ry / rect.height) * 100;
 
       xPercent = Math.max(0, Math.min(xPercent, 100));
       yPercent = Math.max(0, Math.min(yPercent, 100));
@@ -1190,8 +1208,14 @@ export default function App() {
 
     if (editorLayout === 'custom' && (selectedTool === 'line' || selectedTool === 'rect') && canvasRef.current) {
       const rect = canvasRef.current.getBoundingClientRect();
-      const xPercent = ((e.clientX - rect.left) / rect.width) * 100;
-      const yPercent = ((e.clientY - rect.top) / rect.height) * 100;
+      const lx = e.clientX - rect.left;
+      const ly = e.clientY - rect.top;
+      const cx = rect.width / 2;
+      const cy = rect.height / 2;
+      const rx = (lx - cx - pan.x) / zoom + cx;
+      const ry = (ly - cy - pan.y) / zoom + cy;
+      const xPercent = (rx / rect.width) * 100;
+      const yPercent = (ry / rect.height) * 100;
 
       if (!isDrawingStep2) {
         setIsDrawingStep2(true);
@@ -1535,6 +1559,67 @@ export default function App() {
     return themes[theme] || themes.slate;
   };
 
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (loginId.toUpperCase() === 'KTCN' && loginPass === 'KTCNPRO') {
+      setIsAuthenticated(true);
+      setLoginError(false);
+    } else {
+      setLoginError(true);
+    }
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-[#02050e] flex items-center justify-center p-4">
+        <form onSubmit={handleLogin} className="bg-slate-900 border border-slate-800 p-8 rounded-xl shadow-2xl max-w-sm w-full">
+          <div className="mb-8 text-center flex flex-col items-center justify-center">
+            <div className="w-16 h-16 bg-sky-500/20 text-sky-400 rounded-full flex items-center justify-center mb-4">
+              <Lock className="w-8 h-8" />
+            </div>
+            <h1 className="text-2xl font-bold text-slate-200">Truy Cập Hệ Thống</h1>
+            <p className="text-slate-400 text-sm mt-2">Vui lòng nhập ID và Mật khẩu để bắt đầu</p>
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-slate-400 text-xs font-bold mb-1.5 uppercase tracking-wider">ID Đăng Nhập</label>
+              <input
+                type="text"
+                value={loginId}
+                onChange={(e) => setLoginId(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded outline-none px-4 py-2 text-slate-200 focus:border-sky-500 transition-colors"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 text-xs font-bold mb-1.5 uppercase tracking-wider">Mật Khẩu</label>
+              <input
+                type="password"
+                value={loginPass}
+                onChange={(e) => setLoginPass(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded outline-none px-4 py-2 text-slate-200 focus:border-sky-500 transition-colors"
+              />
+            </div>
+            
+            {loginError && (
+              <div className="text-rose-400 text-sm text-center font-medium bg-rose-500/10 py-2 rounded">
+                ID hoặc Mật khẩu không chính xác!
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="w-full bg-sky-600 hover:bg-sky-500 text-white font-bold py-2.5 rounded transition-colors mt-2"
+            >
+              Đăng Nhập
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+
   return (
     <div
       className="min-h-screen p-4 flex flex-col items-center select-none overflow-hidden"
@@ -1569,7 +1654,7 @@ export default function App() {
             <Save className="w-3.5 h-3.5" /> Lưu Dự Án
           </button>
           <button
-            onClick={() => exportToPdf('canvas-export-wrapper', 'topology-simulation')}
+            onClick={() => exportToPdf('canvas-export-wrapper', 'topology-simulation', networkNodeList, clientNodeList)}
             className="px-3 py-1.5 bg-indigo-955/40 text-indigo-300 hover:bg-indigo-900 border border-indigo-800 text-xs rounded transition flex items-center gap-1 font-semibold cursor-pointer"
             title="Xuất bản vẽ hiện trạng ra file PDF"
           >
