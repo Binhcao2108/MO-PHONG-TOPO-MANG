@@ -29,7 +29,8 @@ import {
   Upload,
   Save,
   FolderOpen,
-  Lock
+  Lock,
+  CloudDownload
 } from 'lucide-react';
 import { exportToPdf } from './utils/pdfExport';
 import { exportToJson, importFromJson } from './utils/fileUtils';
@@ -827,6 +828,52 @@ export default function App() {
     });
   };
 
+  const handleSyncLibrary = async () => {
+    addLog('Hệ thống', 'Đang đồng bộ thư viện...', 'info');
+    try {
+      let dataStr = '';
+      
+      try {
+        const res = await fetch('/api/fetch-drive');
+        if (res.ok) {
+          dataStr = await res.text();
+        }
+      } catch (err) {
+        // Log silently
+      }
+
+      if (!dataStr) {
+        // Fallback for Vercel static deployment using a public CORS proxy
+        const driveUrl = "https://drive.google.com/uc?export=download&id=1V3M3kcg-ZDGmNK_TwzOx_9AzviWyumxI";
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(driveUrl)}`;
+        const proxyRes = await fetch(proxyUrl);
+        if (!proxyRes.ok) throw new Error('CORS Proxy fetch failed');
+        const proxyData = await proxyRes.json();
+        dataStr = proxyData.contents;
+      }
+      
+      if (!dataStr) {
+        throw new Error('Dữ liệu tải về trống');
+      }
+
+      const parsedData = JSON.parse(dataStr);
+      let imported = false;
+      if (parsedData.networkNodes) { setNetworkNodes(parsedData.networkNodes); imported = true; }
+      if (parsedData.clientNodes) { setClientNodes(parsedData.clientNodes); imported = true; }
+      if (parsedData.walls) { setCustomWalls(parsedData.walls); imported = true; }
+      if (parsedData.deviceTemplates) { setDeviceTemplates(parsedData.deviceTemplates); imported = true; }
+      
+      if (imported) {
+        addLog('Hệ thống', 'Đồng bộ thư viện thành công!', 'success');
+      } else {
+        addLog('Hệ thống', 'Dữ liệu đồng bộ không hợp lệ', 'error');
+      }
+    } catch (error) {
+      console.error(error);
+      addLog('Lỗi', `Đồng bộ thất bại: ${error}`, 'error');
+    }
+  };
+
   const handleExportIcons = () => {
     exportToJson(deviceTemplates, 'topology_icons');
     addLog('System', 'Đã xuất thư viện icon thành công', 'success');
@@ -1425,6 +1472,13 @@ export default function App() {
             title="Tải lên file dự án (.json)"
           >
             <FolderOpen className="w-3.5 h-3.5" /> Mở Dự Án
+          </button>
+          <button
+            onClick={handleSyncLibrary}
+            className="px-3 py-1.5 bg-amber-955/40 text-amber-300 hover:bg-amber-900 border border-amber-800 text-xs rounded transition flex items-center gap-1 font-semibold cursor-pointer"
+            title="Đồng bộ thư viện từ Google Drive"
+          >
+            <CloudDownload className="w-3.5 h-3.5" /> Đồng Bộ Thư Viện
           </button>
           <button
             onClick={handleExportProject}
